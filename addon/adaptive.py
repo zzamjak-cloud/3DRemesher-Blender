@@ -131,6 +131,9 @@ def _reduce_mesh(
 ) -> None:
     blocked_edges = set()
     start_count = _active_face_count(faces)
+    reference_density = _mean_density(densities, density_scale)
+    # 대칭 후보의 마지막 부동소수점 자릿수가 플랫폼별 축소 순서를 바꾸지 않게 한다.
+    cost_quantum = max(_bbox_diagonal(vertices) ** 2 * reference_density ** 2 * 1.0e-12, 1.0e-30)
     while _active_face_count(faces) > target_triangles:
         _check_cancelled(cancelled)
         current_count = _active_face_count(faces)
@@ -158,7 +161,7 @@ def _reduce_mesh(
             )
             if plan is not None and current_count - plan.removed_count >= target_triangles:
                 candidates.append((plan.cost, edge, plan))
-        candidates.sort(key=lambda item: (item[0], item[1]))
+        candidates.sort(key=lambda item: (round(item[0] / cost_quantum), item[1]))
         candidates = _low_cost_candidate_batch(candidates)
 
         accepted = False
@@ -190,7 +193,8 @@ def _reduce_mesh(
             current_count = _active_face_count(faces)
             if current_count - plan.removed_count < target_triangles:
                 continue
-            if not _surface_safe_collapse(vertices, faces, topology, plan, surface, surface_limit):
+            local_limit = _density_surface_limit(densities, edge, density_scale, reference_density, surface_limit)
+            if not _surface_safe_collapse(vertices, faces, topology, plan, surface, local_limit):
                 blocked_edges.add(edge)
                 blocked = True
                 continue
@@ -276,6 +280,7 @@ def _redistribute_density(
     surface_limit: float,
 ) -> None:
     budget = max(1, min(32, _active_face_count(faces) // 4))
+    reference_density = _mean_density(densities, density_scale)
     protected_vertices = _protected_vertices(faces, hard_edges)
     for iteration in range(budget):
         _check_cancelled(cancelled)
@@ -304,7 +309,13 @@ def _redistribute_density(
         if not collapse_options:
             return
         collapse_options.sort(key=lambda item: (item[0], item[1]))
-        selected = next((item for item in collapse_options if _surface_safe_collapse(vertices, faces, topology, item[2], surface, surface_limit)),None)
+        selected = next((
+            item for item in collapse_options
+            if _surface_safe_collapse(
+                vertices, faces, topology, item[2], surface,
+                _density_surface_limit(densities, item[1], density_scale, reference_density, surface_limit),
+            )
+        ), None)
         if selected is None:
             return
         _, collapse_edge, collapse_plan = selected
@@ -780,6 +791,23 @@ def _compact(
 def _edge_density(densities: Sequence[float], edge: tuple[int, int], density_scale: float) -> float:
     average = (densities[edge[0]] + densities[edge[1]]) * 0.5
     return max(0.05, average) ** density_scale
+
+
+def _mean_density(densities: Sequence[float], density_scale: float) -> float:
+    return fsum(max(0.05, value) ** density_scale for value in densities) / len(densities)
+
+
+def _density_surface_limit(
+    densities: Sequence[float],
+    edge: tuple[int, int],
+    density_scale: float,
+    reference_density: float,
+    surface_limit: float,
+) -> float:
+    # 고밀도 영역의 허용 편차를 좁혀 형상 한계에서도 세부 면을 남긴다.
+    # 저밀도 영역도 기존 전역 표면 편차 기준을 완화하지 않는다.
+    density = _edge_density(densities, edge, density_scale)
+    return surface_limit * min(1.0, sqrt(reference_density / density))
 
 
 def _has_density_contrast(densities: Sequence[float]) -> bool:
