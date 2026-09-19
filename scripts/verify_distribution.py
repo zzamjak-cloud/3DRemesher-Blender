@@ -19,6 +19,7 @@ import importlib
 import json
 import os
 import time
+import tomllib
 from pathlib import Path
 import bpy
 
@@ -35,8 +36,9 @@ bpy.ops.wm.save_userpref()
 module_name = "bl_ext.release.zzamjak_3d_remesher"
 assert module_name in bpy.context.preferences.addons
 module = importlib.import_module(module_name)
-assert ".".join(map(str, module.bl_info["version"])) == os.environ["REMESHER_EXPECTED_VERSION"]
 installed = Path(module.__file__).resolve()
+manifest = tomllib.loads((installed.parent / "blender_manifest.toml").read_text(encoding="utf-8"))
+assert manifest["version"] == os.environ["REMESHER_EXPECTED_VERSION"]
 assert installed.is_relative_to(profile.resolve())
 assert not (Path(repo.directory) / "zzamjak_3d_remesher").is_symlink()
 bpy.ops.object.select_all(action="DESELECT")
