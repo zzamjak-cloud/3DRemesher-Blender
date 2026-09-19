@@ -1,0 +1,61 @@
+name: Extensions Repository
+
+on:
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: extensions-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Blender LTS 다운로드
+        run: |
+          curl -fL https://download.blender.org/release/Blender5.2/blender-5.2.0-linux-x64.tar.xz -o "$RUNNER_TEMP/blender.tar.xz"
+          mkdir -p "$RUNNER_TEMP/blender"
+          tar -xf "$RUNNER_TEMP/blender.tar.xz" -C "$RUNNER_TEMP/blender" --strip-components=1
+          echo "BLENDER_BINARY=$RUNNER_TEMP/blender/blender" >> "$GITHUB_ENV"
+      - name: 게시된 정식 릴리스 ZIP 수집
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p dist/releases
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases" \
+            --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name' > dist/release-tags.txt
+          while IFS= read -r tag; do
+            gh release download "$tag" --pattern 'zzamjak_3d_remesher-v*.zip' --dir dist/releases
+          done < dist/release-tags.txt
+      - name: 공식 Extensions 인덱스 생성 및 자산 검증
+        run: python scripts/build_repository.py --release-dir dist/releases --output-dir dist/pages --blender-binary "$BLENDER_BINARY"
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist/pages
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Extensions 저장소 게시
+        id: deployment
+        uses: actions/deploy-pages@v4

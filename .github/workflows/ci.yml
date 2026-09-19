@@ -2,15 +2,29 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - version: 4.2.0
+            series: '4.2'
+          - version: 5.2.0
+            series: '5.2'
     env:
-      BLENDER_VERSION: 5.2.0
-      BLENDER_ARCHIVE: blender-5.2.0-linux-x64.tar.xz
-      BLENDER_URL: https://download.blender.org/release/Blender5.2/blender-5.2.0-linux-x64.tar.xz
+      BLENDER_VERSION: ${{ matrix.version }}
+      BLENDER_SERIES: ${{ matrix.series }}
+      BLENDER_ARCHIVE: blender-${{ matrix.version }}-linux-x64.tar.xz
+      BLENDER_URL: https://download.blender.org/release/Blender${{ matrix.series }}/blender-${{ matrix.version }}-linux-x64.tar.xz
     steps:
       - uses: actions/checkout@v4
 
@@ -19,7 +33,9 @@ jobs:
           python-version: "3.11"
 
       - name: Python unittest 실행
-        run: python -m unittest discover -s tests -p "test_*.py"
+        run: |
+          python scripts/verify_project.py
+          python -m unittest discover -s tests -p "test_*.py"
 
       - name: Blender LTS 다운로드
         run: |
@@ -33,7 +49,7 @@ jobs:
 
       - name: Blender 등록 및 엔진 통합 검증
         run: |
-          profile="$RUNNER_TEMP/3DRemesherDev/5.2"
+          profile="$RUNNER_TEMP/3DRemesherDev/$BLENDER_SERIES"
           repo_dir="$profile/extensions/user_default"
           mkdir -p "$repo_dir" "$profile/config" "$profile/scripts" "$profile/datafiles"
           ln -s "$GITHUB_WORKSPACE" "$repo_dir/zzamjak_3d_remesher"
@@ -46,3 +62,11 @@ jobs:
           REMESHER_DEV_PROFILE="$profile" \
           REMESHER_EXTENSION_ID="zzamjak_3d_remesher" \
           "$BLENDER_BINARY" --background --python-exit-code 1 --python scripts/dev_bootstrap.py --python tests/blender_smoke.py --python tests/blender_engine.py --python tests/blender_acceptance.py
+
+      - name: 검증한 설치 ZIP 보관
+        if: matrix.version == '5.2.0'
+        uses: actions/upload-artifact@v4
+        with:
+          name: extension-package
+          path: dist/zzamjak_3d_remesher-v*.zip
+          if-no-files-found: error

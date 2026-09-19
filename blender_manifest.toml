@@ -5,8 +5,12 @@ version = "0.3.0"
 name = "3D Remesher"
 tagline = "대칭과 밀도를 제어하는 적응형 쿼드 리토폴로지"
 maintainer = "zzamjak-cloud"
+website = "https://github.com/zzamjak-cloud/3DRemesher-Blender"
 type = "add-on"
 
 blender_version_min = "4.2.0"
 license = ["SPDX:GPL-3.0-or-later"]
 tags = ["Mesh", "Modeling"]
+
+[permissions]
+files = "리메시 계산용 임시 입력과 결과 파일 읽기 및 쓰기"
