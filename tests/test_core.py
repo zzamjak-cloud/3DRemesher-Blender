@@ -66,6 +66,54 @@ class CoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "밀도 속성 이름"):
             build_engine_input(mesh, RemeshSettings(density_attribute_name=" "))
 
+    def test_settings_validates_topology_mode(self):
+        self.assertEqual(RemeshSettings(topology_mode="structured").topology_mode, "STRUCTURED")
+        mesh = MeshData(
+            vertices=((0, 0, 0), (1, 0, 0), (0, 1, 0)),
+            faces=((0, 1, 2),),
+        )
+
+        with self.assertRaisesRegex(ValueError, "위상 모드"):
+            build_engine_input(mesh, RemeshSettings(topology_mode="FAST"))
+
+    def test_guide_metadata_defaults_to_open_direction(self):
+        guide = GuideCurveData(name="REMESH_GUIDE_axis", splines=(((0.0, 0.0, 0.0), (1.0, 0.0, 0.0)),))
+
+        self.assertEqual(guide.kind, ("DIRECTION",))
+        self.assertEqual(guide.closed, (False,))
+
+    def test_guide_metadata_validates_kind_and_closed_state(self):
+        GuideCurveData(
+            name="REMESH_GUIDE_LOOP_eye",
+            splines=(((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)),),
+            kind=("LOOP",),
+            closed=(True,),
+        )
+
+        with self.assertRaisesRegex(ValueError, "LOOP 가이드"):
+            GuideCurveData(
+                name="REMESH_GUIDE_LOOP_open",
+                splines=(((0.0, 0.0, 0.0), (1.0, 0.0, 0.0)),),
+                kind=("LOOP",),
+                closed=(False,),
+            )
+        with self.assertRaisesRegex(ValueError, "STRIP 가이드"):
+            GuideCurveData(
+                name="REMESH_GUIDE_STRIP_closed",
+                splines=(((0.0, 0.0, 0.0), (1.0, 0.0, 0.0)),),
+                kind=("STRIP",),
+                closed=(True,),
+            )
+        with self.assertRaisesRegex(ValueError, "kind 메타데이터"):
+            GuideCurveData(
+                name="REMESH_GUIDE_bad_count",
+                splines=(
+                    ((0.0, 0.0, 0.0), (1.0, 0.0, 0.0)),
+                    ((0.0, 1.0, 0.0), (1.0, 1.0, 0.0)),
+                ),
+                kind=("DIRECTION",),
+            )
+
     def test_rejects_non_finite_density_and_guide_values(self):
         mesh = MeshData(
             vertices=((0, 0, 0), (1, 0, 0), (0, 1, 0)),

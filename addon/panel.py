@@ -16,6 +16,7 @@ class ZJREMESH_PT_sidebar(bpy.types.Panel):
         layout = self.layout
         props = context.scene.zzamjak_3d_remesher
 
+        layout.prop(props, "topology_mode")
         layout.prop(props, "target_quad_count")
         layout.label(text="위상·특징선에 따라 실제 개수 차이")
 
@@ -32,7 +33,11 @@ class ZJREMESH_PT_sidebar(bpy.types.Panel):
         layout.label(text="속성이 없으면 균일 밀도")
 
         layout.label(text="가이드 커브: REMESH_GUIDE_ 접두사")
-        layout.label(text="엔진: 적응형 쿼드 리메시")
+        layout.label(text="튜브: LOOP=둘레, STRIP_=세로")
+        if props.topology_mode == "LEGACY":
+            layout.label(text="실험 엔진: 루프 흐름 미보장", icon="INFO")
+        elif props.topology_mode == "STRUCTURED":
+            layout.label(text="격자 미지원 형상은 실행 중단", icon="INFO")
 
         layout.operator("object.zzamjak_3d_remesher_prepare_density", icon="GROUP_VCOL")
         layout.operator("object.zzamjak_3d_remesher_analyze", icon="VIEWZOOM")

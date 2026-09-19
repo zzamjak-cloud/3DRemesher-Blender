@@ -12,7 +12,13 @@ from addon.core import (
     analyze_mesh,
     build_engine_input,
 )
-from addon.engine import MAX_FACE_VERTICES, MAX_OUTPUT_QUADS
+from addon.engine import (
+    FACE_NORMAL_EPSILON,
+    MAX_FACE_VERTICES,
+    MAX_OUTPUT_QUADS,
+    _project_face_for_validation,
+    _validate_topology,
+)
 
 
 class EngineTests(unittest.TestCase):
@@ -34,9 +40,10 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(result.quality.actual_quad_count,6)
         self.assertEqual(result.quality.boundary_edge_count,0)
 
-    def test_symmetry_budget_compares_neighboring_patch_counts(self):
+    def test_symmetry_preserves_uniform_cube_grid(self):
         result=RemeshBackend().remesh(build_engine_input(_cube_mesh(),RemeshSettings(target_quad_count=64,symmetry_axes=("X","Y","Z"))))
-        self.assertLessEqual(result.quality.target_error_ratio,.125)
+        self.assertEqual(result.quality.actual_quad_count, 54)
+        self.assertAlmostEqual(result.quality.target_error_ratio, 10 / 64)
         self.assertEqual(result.quality.symmetry_error,0.)
         self.assertEqual(result.quality.boundary_edge_count,0)
 
@@ -172,6 +179,36 @@ class EngineTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "자기교차"):
             RemeshBackend().remesh(build_engine_input(bow_tie, RemeshSettings(target_quad_count=4)))
 
+    def test_tiny_valid_face_uses_face_area_epsilon(self):
+        height = 4.840842993295e-10
+        mesh = MeshData(
+            vertices=((0, 0, 0), (1, 0, 0), (1, height, 0), (0, height, 0)),
+            faces=((0, 1, 2, 3),),
+        )
+
+        self.assertEqual(analyze_mesh(mesh).degenerate_face_count, 0)
+        topology = _validate_topology(mesh, 180.0)
+
+        self.assertGreater(_vector_length(topology.face_normals[0]), 0.999999)
+        self.assertGreater(2.0 * height, FACE_NORMAL_EPSILON)
+
+    def test_true_zero_area_face_is_still_rejected(self):
+        mesh = MeshData(
+            vertices=((0, 0, 0), (1, 0, 0), (2, 0, 0)),
+            faces=((0, 1, 2),),
+        )
+
+        with self.assertRaisesRegex(ValueError, "면적"):
+            _validate_topology(mesh, 180.0)
+
+    def test_tiny_projection_normal_does_not_fall_back_to_wrong_axis(self):
+        height = 4.840842993295e-10
+        vertices = ((0, 0, 0), (0, 1, 0), (0, 1, height), (0, 0, height))
+
+        points = _project_face_for_validation(vertices, (0, 1, 2, 3))
+
+        self.assertGreater(abs(_signed_area_2d(points)), 0.0)
+
     def test_cancellation_keeps_topology_unchanged(self):
         mesh = _cube_mesh()
         engine_input = build_engine_input(mesh, RemeshSettings(target_quad_count=96))
@@ -240,6 +277,17 @@ def _signed_xy_area(vertices, face) -> float:
         second_vertex = vertices[second]
         area += first_vertex[0] * second_vertex[1] - second_vertex[0] * first_vertex[1]
     return area
+
+
+def _signed_area_2d(points) -> float:
+    area = 0.0
+    for first, second in zip(points, (*points[1:], points[0])):
+        area += first[0] * second[1] - second[0] * first[1]
+    return area * 0.5
+
+
+def _vector_length(vector) -> float:
+    return sum(component * component for component in vector) ** 0.5
 
 
 if __name__ == "__main__":

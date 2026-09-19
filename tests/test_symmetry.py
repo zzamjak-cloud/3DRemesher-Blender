@@ -58,6 +58,44 @@ class SymmetryTests(unittest.TestCase):
         self.assertEqual(len(mirrored.faces), 1)
         self.assertEqual(len({tuple(sorted(face)) for face in mirrored.faces}), len(mirrored.faces))
 
+    def test_mirror_x_plane_quad_grid_is_not_duplicated(self):
+        mesh = _x_plane_quad_grid(2)
+
+        mirrored = mirror_symmetry(mesh, ("X",))
+
+        self.assertEqual(len(mirrored.faces), 4)
+        self.assertEqual(_geometric_duplicate_face_count(mirrored), 0)
+        self.assertEqual(_loose_vertex_count(mirrored), 0)
+        _validate_topology(mirrored, 180.0)
+
+    def test_mirror_point_touch_triangle_keeps_axis_point_split(self):
+        mesh = MeshData(
+            vertices=((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 1.0, 0.0)),
+            faces=((0, 1, 2),),
+        )
+
+        mirrored = mirror_symmetry(mesh, ("X",))
+        origin_count = sum(1 for vertex in mirrored.vertices if vertex == (0.0, 0.0, 0.0))
+
+        self.assertEqual(origin_count, 2)
+        self.assertEqual(symmetry_error(mirrored, ("X",)), 0.0)
+        self.assertEqual(analyze_mesh(mirrored).non_manifold_edge_count, 0)
+        _validate_topology(mirrored, 180.0)
+
+    def test_mirror_point_touch_quad_keeps_axis_point_split(self):
+        mesh = MeshData(
+            vertices=((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 1.0, 0.0), (0.25, 1.0, 0.0)),
+            faces=((0, 1, 2, 3),),
+        )
+
+        mirrored = mirror_symmetry(mesh, ("X",))
+        origin_count = sum(1 for vertex in mirrored.vertices if vertex == (0.0, 0.0, 0.0))
+
+        self.assertEqual(origin_count, 2)
+        self.assertEqual(symmetry_error(mirrored, ("X",)), 0.0)
+        self.assertEqual(analyze_mesh(mirrored).non_manifold_edge_count, 0)
+        _validate_topology(mirrored, 180.0)
+
     def test_mirror_multi_axis_builds_exact_vertex_symmetry(self):
         mesh = MeshData(
             vertices=((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 2.0, 0.0), (0.0, 0.0, 3.0)),
@@ -263,6 +301,38 @@ def _ico_sphere_fixture() -> MeshData:
 
 def _edge_points(mesh: MeshData, edge: tuple[int, int]) -> set[tuple[float, float, float]]:
     return {mesh.vertices[edge[0]], mesh.vertices[edge[1]]}
+
+
+def _x_plane_quad_grid(divisions: int) -> MeshData:
+    vertices = []
+    for y in range(divisions + 1):
+        for z in range(divisions + 1):
+            vertices.append((0.0, float(y), float(z)))
+
+    def index(y: int, z: int) -> int:
+        return y * (divisions + 1) + z
+
+    faces = []
+    for y in range(divisions):
+        for z in range(divisions):
+            faces.append((index(y, z), index(y + 1, z), index(y + 1, z + 1), index(y, z + 1)))
+    return MeshData(tuple(vertices), tuple(faces))
+
+
+def _geometric_duplicate_face_count(mesh: MeshData) -> int:
+    seen = set()
+    duplicates = 0
+    for face in mesh.faces:
+        key = tuple(sorted(mesh.vertices[index] for index in face))
+        if key in seen:
+            duplicates += 1
+        seen.add(key)
+    return duplicates
+
+
+def _loose_vertex_count(mesh: MeshData) -> int:
+    used = {index for face in mesh.faces for index in face}
+    return len(mesh.vertices) - len(used)
 
 
 def _ico_sphere_fixture() -> MeshData:

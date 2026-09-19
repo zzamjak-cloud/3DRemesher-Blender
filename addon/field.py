@@ -190,8 +190,12 @@ def _map_vertices_to_surface_components(vertices, faces, vertex_faces, surface, 
         return {vertex: component for vertex in vertex_faces}
     output_components = _output_face_components(faces)
     component_votes = defaultdict(lambda: defaultdict(int))
+    # 이동하지 않는 경계·특징선만 있는 조각은 재투영할 표면을 찾을 필요가 없다.
+    movable_components = {output_components[i] for i, face in enumerate(faces) if any(v not in fixed for v in face)}
     for face_index, face in enumerate(faces):
         output_component = output_components[face_index]
+        if output_component not in movable_components:
+            continue
         face_normal = _normal(vertices, face)
         for vertex in face:
             try:
@@ -210,6 +214,8 @@ def _map_vertices_to_surface_components(vertices, faces, vertex_faces, surface, 
 
     vertex_components = {}
     for vertex, incident in vertex_faces.items():
+        if vertex in fixed:
+            continue
         votes = defaultdict(int)
         for face_index in incident:
             votes[output_to_source[output_components[face_index]]] += 1
@@ -264,6 +270,8 @@ def _surface_move_valid(vertices, faces, incident, vertex, point, surface, compo
 
 
 def _valid_move(vertices, faces, incident, vertex, point):
+    from .engine import FACE_NORMAL_EPSILON
+
     for i in incident:
         face=faces[i]
         old=[vertices[v] for v in face]
@@ -273,6 +281,9 @@ def _valid_move(vertices, faces, incident, vertex, point):
         new_normal=(0.,0.,0.)
         for j in range(1,len(face)-1):
             new_normal=add(new_normal,cross(sub(new[j],new[0]),sub(new[j+1],new[0])))
+        # 이동 한 번으로 최종 면적 검사를 통과하지 못하는 면을 만들지 않는다.
+        if sqrt(dot(new_normal, new_normal)) <= FACE_NORMAL_EPSILON:
+            return False
         axis=max(range(3),key=lambda a:abs(new_normal[a]))
         plane=[tuple(c for a,c in enumerate(p) if a!=axis) for p in new]
         turns=[]

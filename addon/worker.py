@@ -17,6 +17,9 @@ from addon.core import GuideCurveData, MeshData, RemeshBackend, RemeshSettings
 
 
 def main(argv: list[str]) -> int:
+    large_input = len(argv) > 1 and argv[1] == "--large"
+    if large_input:
+        argv = [argv[0], *argv[2:]]
     if len(argv) != 5:
         print("usage: worker.py input.json result.json progress.json cancel", file=sys.stderr)
         return 2
@@ -37,7 +40,14 @@ def main(argv: list[str]) -> int:
             return cancel_path.exists()
 
         progress(0.0, "엔진 준비")
-        result = RemeshBackend().remesh(engine_input, progress=progress, cancelled=cancelled)
+        if large_input:
+            import bpy
+            from addon.large_mesh import remesh_large
+
+            bpy.context.preferences.filepaths.temporary_directory = str(input_path.parent) + os.sep
+            result = remesh_large(engine_input, progress=progress, cancelled=cancelled)
+        else:
+            result = RemeshBackend().remesh(engine_input, progress=progress, cancelled=cancelled)
         _write_json(result_path, {"ok": True, "result": _serialize_result(result)})
         return 0
     except BaseException as exc:
@@ -68,6 +78,7 @@ def _build_engine_input(payload: dict):
         guide_curve_names=tuple(settings_payload.get("guide_curve_names", ())),
         density_attribute_name=str(settings_payload["density_attribute_name"]),
         density_scale=float(settings_payload["density_scale"]),
+        topology_mode=str(settings_payload.get("topology_mode", "AUTO")),
     )
     guides = tuple(
         GuideCurveData(
@@ -76,6 +87,8 @@ def _build_engine_input(payload: dict):
                 tuple(tuple(float(component) for component in point) for point in spline)
                 for spline in guide.get("splines", ())
             ),
+            kind=tuple(str(value) for value in guide.get("kind", ())),
+            closed=tuple(bool(value) for value in guide.get("closed", ())),
         )
         for guide in payload.get("guide_curves", ())
     )
@@ -145,4 +158,5 @@ def _write_json(path: Path, payload: dict) -> None:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv))
+    arguments = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else sys.argv[1:]
+    raise SystemExit(main([__file__, *arguments]))

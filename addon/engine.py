@@ -20,6 +20,7 @@ from .core import (
 
 
 EPSILON = 1.0e-9
+FACE_NORMAL_EPSILON = 2.0e-12
 PLANAR_EPSILON = 1.0e-6
 MAX_SOURCE_VERTICES = 20000
 MAX_SOURCE_FACES = 10000
@@ -64,6 +65,21 @@ def remesh(
     _validate_size(engine_input.mesh)
     _check_cancelled(cancelled)
     _report(progress, 0.01, "입력과 특징선 검증")
+    required_guides = tuple(
+        guide.name
+        for guide in engine_input.guide_curves
+        if any(kind in {"LOOP", "STRIP"} for kind in guide.kind)
+    )
+    if required_guides and settings.topology_mode == "LEGACY":
+        raise ValueError("실험 엔진은 필수 LOOP/STRIP 가이드를 보존하지 못합니다. 격자 경로를 선택해 주세요.")
+    if settings.topology_mode != "LEGACY":
+        structured = _try_structured_remesh(engine_input, progress=progress, cancelled=cancelled)
+        if structured is not None:
+            return structured
+        if required_guides:
+            raise ValueError(f"필수 가이드의 연속 엣지 경로를 만들지 못했습니다: {', '.join(required_guides)}. 현재 LOOP/STRIP은 독립 튜브의 둘레·길이 방향만 지원합니다.")
+        if settings.topology_mode == "STRUCTURED":
+            raise ValueError("이 형상과 가이드에는 연속 격자 배치를 만들 수 없습니다. 격자 경계를 지정하거나 실험 엔진을 선택해 주세요.")
     source = engine_input.mesh
     scale = max(max(v[a] for v in source.vertices)-min(v[a] for v in source.vertices) for a in range(3))
     if scale <= 0:
@@ -85,6 +101,8 @@ def remesh(
     capped_target = min(settings.target_quad_count, MAX_OUTPUT_QUADS)
     sector_target = max(1, round(capped_target/factor))
     warnings = []
+    if settings.topology_mode == "AUTO":
+        warnings.append("연속 격자 배치를 만들지 못해 실험 엔진을 사용했습니다. 엣지 루프 흐름을 확인하세요.")
     if capped_target != settings.target_quad_count:
         warnings.append(f"출력 상한 {MAX_OUTPUT_QUADS}쿼드에 맞춰 목표를 제한했습니다.")
     if axes:
@@ -181,6 +199,74 @@ def remesh(
         symmetry_error,field_score),tuple(dict.fromkeys(warnings)),())
 
 
+def _try_structured_remesh(
+    engine_input: EngineInput,
+    *,
+    progress: ProgressCallback | None,
+    cancelled: CancelledCallback | None,
+) -> RemeshResult | None:
+    if engine_input.settings.target_quad_count > MAX_OUTPUT_QUADS:
+        return None
+    from .surface import SurfaceIndex
+    from .topology.planar import try_remesh_planar
+    from .topology.periodic import try_remesh_periodic
+
+    source = engine_input.mesh
+    _validate_topology(source, engine_input.settings.hard_edge_angle_degrees)
+    for label, builder in (
+        ("평면 격자", try_remesh_planar),
+        ("주기 격자", try_remesh_periodic),
+    ):
+        _check_cancelled(cancelled)
+        _report(progress, 0.08, f"{label} 배치 탐색")
+        output = builder(engine_input, cancelled=cancelled)
+        if output is None:
+            continue
+        if len(output.faces) > MAX_OUTPUT_QUADS:
+            raise ValueError(f"{label} 결과가 출력 상한 {MAX_OUTPUT_QUADS}쿼드를 초과했습니다.")
+        _validate_topology(output, 180.0)
+        analysis = analyze_mesh(output)
+        if analysis.quad_ratio != 1.0 or analysis.non_manifold_edge_count or analysis.degenerate_face_count:
+            raise ValueError(f"{label} 결과의 위상 검증에 실패했습니다.")
+        # 경계 엣지 수는 분할 수에 따라 달라지므로 열린/닫힌 상태만 비교한다.
+        if bool(analysis.boundary_edge_count) != bool(engine_input.analysis.boundary_edge_count):
+            raise ValueError(f"{label} 결과의 열린 경계가 원본과 다릅니다.")
+        _report(progress, 0.78, "원본 표면 오차 검사")
+        surface = SurfaceIndex(_triangulated(source, source.hard_edges))
+        distances = []
+        for index, point in enumerate((*output.vertices, *(_centroid([output.vertices[v] for v in face]) for face in output.faces))):
+            if index % 256 == 0:
+                _check_cancelled(cancelled)
+            distances.append(surface.nearest(point)[1])
+        scale = max(max(v[a] for v in source.vertices) - min(v[a] for v in source.vertices) for a in range(3))
+        maximum = max(distances, default=0.0)
+        if maximum > MAX_SURFACE_ERROR_RATIO * scale:
+            raise ValueError(f"{label} 결과가 원본 표면에서 너무 멉니다: {maximum:.6g}")
+        maximum_aspect, mean_aspect = _quad_aspect_stats(output.vertices, output.faces)
+        target = engine_input.settings.target_quad_count
+        target_error = abs(analysis.quad_count - target) / target
+        symmetry_error = _symmetry_error(output, tuple(sorted(set(engine_input.settings.symmetry_axes))))
+        if symmetry_error > 1.0e-6 * scale:
+            raise ValueError(f"{label} 결과가 요청한 대칭을 지키지 못했습니다.")
+        warnings = []
+        if analysis.quad_count != target:
+            warnings.append(f"격자 분할 제약으로 목표와 실제 개수가 다릅니다: target={target}, actual={analysis.quad_count} ({target_error:.1%})")
+        _report(progress, 1.0, f"{label} 완료")
+        return RemeshResult(
+            output,
+            RemeshQuality(
+                target, analysis.quad_count, analysis.quad_ratio,
+                analysis.boundary_edge_count, analysis.non_manifold_edge_count,
+                analysis.degenerate_face_count, maximum_aspect, mean_aspect,
+                target_error, maximum, sum(distances) / max(1, len(distances)),
+                symmetry_error, 1.0,
+            ),
+            tuple(warnings),
+            (),
+        )
+    return None
+
+
 def _triangulated(mesh, hard_edges):
     faces=[]
     for i,face in enumerate(mesh.faces):
@@ -230,9 +316,10 @@ def _validate_topology(mesh: MeshData, hard_edge_angle_degrees: float) -> _Topol
             raise ValueError(f"{face_index}번 면은 자기교차 n-gon이라 안전하게 처리할 수 없습니다.")
 
         normal = _polygon_normal(mesh.vertices, face)
-        if _length(normal) <= EPSILON:
+        normal_length = _length(normal)
+        if normal_length <= FACE_NORMAL_EPSILON:
             raise ValueError(f"{face_index}번 면은 면적이 없어 퇴화되었습니다.")
-        face_normals.append(_normalize(normal))
+        face_normals.append(_scale(normal, 1.0 / normal_length))
 
         for first, second in _face_edges(face):
             edge = _edge_key(first, second)
@@ -600,7 +687,7 @@ def _project_face(vertices: Sequence[Vector3], face: Sequence[int]) -> list[tupl
 
 def _project_face_for_validation(vertices: Sequence[Vector3], face: Sequence[int]) -> list[tuple[float, float]]:
     normal = _polygon_normal(vertices, face)
-    if _length(normal) <= EPSILON:
+    if _length(normal) <= FACE_NORMAL_EPSILON:
         normal = _fallback_face_normal(vertices, face)
     return _project_face_with_normal(vertices, face, normal)
 
@@ -634,7 +721,7 @@ def _fallback_face_normal(vertices: Sequence[Vector3], face: Sequence[int]) -> V
                 first[2] * second[0] - first[0] * second[2],
                 first[0] * second[1] - first[1] * second[0],
             )
-            if _length(normal) > EPSILON:
+            if _length(normal) > FACE_NORMAL_EPSILON:
                 return normal
     return (0.0, 0.0, 1.0)
 

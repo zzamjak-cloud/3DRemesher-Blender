@@ -68,7 +68,7 @@ jobs:
           REMESHER_DEV_ROOT="$GITHUB_WORKSPACE" \
           REMESHER_DEV_PROFILE="$profile" \
           REMESHER_EXTENSION_ID="zzamjak_3d_remesher" \
-          "$BLENDER_BINARY" --background --python-exit-code 1 --python scripts/dev_bootstrap.py --python tests/blender_smoke.py --python tests/blender_engine.py --python tests/blender_acceptance.py
+          "$BLENDER_BINARY" --background --python-exit-code 1 --python scripts/dev_bootstrap.py --python tests/blender_smoke.py --python tests/blender_engine.py --python tests/blender_acceptance.py --python tests/blender_large_mesh.py
 
       - name: 검증한 설치 ZIP 보관
         if: matrix.version == '5.2.0'

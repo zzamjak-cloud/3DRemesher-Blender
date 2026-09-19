@@ -62,6 +62,27 @@ class FieldTests(unittest.TestCase):
         self.assertEqual(after.faces,skew.faces)
         self.assertTrue(all(abs(p[2])<1e-12 for p in after.vertices))
 
+    def test_projection_cannot_shrink_a_face_below_engine_area_limit(self):
+        from addon.engine import FACE_NORMAL_EPSILON, _validate_topology
+        height = FACE_NORMAL_EPSILON * 2
+        vertices = ((0.,0.,0.), (1.,0.,0.), (0.,height,0.))
+        faces = ((0,1,2),)
+        _validate_topology(MeshData(vertices, faces), 180.)
+        self.assertFalse(_valid_move(vertices, faces, (0,), 2, (0.,height*.15,0.)))
+
+    def test_fixed_patch_preserves_positions_when_surface_votes_tie(self):
+        reference = MeshData(
+            ((0.,0.,0.), (1.,0.,0.), (1.,1.,0.), (0.,1.,0.),
+             (0.,0.,.05), (1.,0.,.05), (1.,1.,.05), (0.,1.,.05)),
+            ((0,1,2), (0,2,3), (4,5,6), (4,6,7)),
+        )
+        mesh = MeshData(
+            ((0.,0.,0.), (1.,0.,0.), (1.,1.,.05), (0.,1.,.05)),
+            ((0,1,2,3),),
+        )
+        after, _ = optimize_quads(mesh, SurfaceIndex(reference), iterations=1)
+        self.assertEqual(after, mesh)
+
     def test_projection_stays_on_mapped_component_for_close_parallel_sheets(self):
         reference=MeshData(
             (

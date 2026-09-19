@@ -115,9 +115,25 @@ def main():
     guide_spline.points[0].co = (11, 0, 0, 1)
     guide_spline.points[1].co = (12, 0, 0, 1)
     guide_obj = bpy.data.objects.new("REMESH_GUIDE_smoke", guide_curve)
+    guide_obj["remesh_guide_kind"] = "STRIP"
     bpy.context.collection.objects.link(guide_obj)
+    loop_curve = bpy.data.curves.new("REMESH_GUIDE_LOOP_smoke", "CURVE")
+    loop_curve.dimensions = "3D"
+    loop_spline = loop_curve.splines.new("POLY")
+    loop_spline.points.add(2)
+    loop_spline.points[0].co = (11, 0, 0, 1)
+    loop_spline.points[1].co = (12, 0, 0, 1)
+    loop_spline.points[2].co = (11, 1, 0, 1)
+    loop_spline.use_cyclic_u = True
+    loop_obj = bpy.data.objects.new("REMESH_GUIDE_LOOP_smoke", loop_curve)
+    bpy.context.collection.objects.link(loop_obj)
     guides = adapter.collect_guide_curves(bpy.context.scene, obj)
-    assert_true(guides and guides[0].splines[0] == ((1.0, 0.0, 0.0), (2.0, 0.0, 0.0)), "가이드 좌표가 선택 메시 로컬 좌표로 변환되지 않았습니다.")
+    guide_by_name = {guide.name: guide for guide in guides}
+    assert_true(guide_by_name["REMESH_GUIDE_smoke"].splines[0] == ((1.0, 0.0, 0.0), (2.0, 0.0, 0.0)), "가이드 좌표가 선택 메시 로컬 좌표로 변환되지 않았습니다.")
+    assert_true(guide_by_name["REMESH_GUIDE_smoke"].kind == ("STRIP",), "열린 STRIP 가이드 종류가 수집되지 않았습니다.")
+    assert_true(guide_by_name["REMESH_GUIDE_smoke"].closed == (False,), "열린 STRIP 가이드 닫힘 상태가 잘못 수집되었습니다.")
+    assert_true(guide_by_name["REMESH_GUIDE_LOOP_smoke"].kind == ("LOOP",), "닫힌 LOOP 가이드 종류가 수집되지 않았습니다.")
+    assert_true(guide_by_name["REMESH_GUIDE_LOOP_smoke"].closed == (True,), "닫힌 LOOP 가이드 닫힘 상태가 수집되지 않았습니다.")
 
     bpy.ops.object.mode_set(mode="EDIT")
     assert_cancelled(bpy.ops.object.zzamjak_3d_remesher_analyze, "오브젝트 모드")
@@ -130,6 +146,11 @@ def main():
     assert_true(engine_input.settings.symmetry_axes == ("X",), "대칭 축이 엔진 입력에 전달되지 않았습니다.")
     assert_true(len(engine_input.density_values) == len(mesh.vertices), "밀도 값이 엔진 입력에 전달되지 않았습니다.")
     assert_true(abs(engine_input.density_values[0] - 0.25) < 1.0e-6, "밀도 컬러 속성 값이 엔진 입력과 다릅니다.")
+    payload = operators._engine_input_payload(engine_input)
+    payload_guides = {guide["name"]: guide for guide in payload["guide_curves"]}
+    assert_true(payload["settings"]["topology_mode"] == "AUTO", "기본 위상 모드가 worker payload에 들어가지 않았습니다.")
+    assert_true(payload_guides["REMESH_GUIDE_smoke"]["kind"] == ["STRIP"], "가이드 종류가 worker payload에 들어가지 않았습니다.")
+    assert_true(payload_guides["REMESH_GUIDE_LOOP_smoke"]["closed"] == [True], "가이드 닫힘 상태가 worker payload에 들어가지 않았습니다.")
 
     original_vertices = tuple(tuple(vertex.co) for vertex in mesh.vertices)
     original_faces = tuple(tuple(polygon.vertices) for polygon in mesh.polygons)

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from array import array
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -105,6 +107,10 @@ def _remesh_with_backend(engine_input):
     def cancelled():
         return False
 
+    from .large_mesh import needs_preprocessing, remesh_large
+
+    if needs_preprocessing(engine_input.mesh):
+        return remesh_large(engine_input, progress=progress, cancelled=cancelled)
     return RemeshBackend().remesh(engine_input, progress=progress, cancelled=cancelled)
 
 
@@ -411,8 +417,11 @@ def _remove_unlinked_result(result_obj) -> None:
 
 
 def _start_worker_job(source_obj, scene, engine_input, warnings: tuple[str, ...]) -> _RunJob:
-    python_executable = _python_executable()
-    if python_executable is None:
+    from .large_mesh import needs_preprocessing
+
+    large_input = needs_preprocessing(engine_input.mesh)
+    executable = Path(bpy.app.binary_path) if large_input else _python_executable()
+    if executable is None or not executable.is_file():
         raise OSError("Blender 번들 Python 실행 파일을 찾을 수 없습니다.")
 
     temp_dir = Path(tempfile.mkdtemp(prefix="zzamjak_3d_remesh_"))
@@ -438,20 +447,29 @@ def _start_worker_job(source_obj, scene, engine_input, warnings: tuple[str, ...]
         env["PYTHONPATH"] = os.pathsep.join(
             item for item in (str(repo_root), env.get("PYTHONPATH", "")) if item
         )
+        arguments = [str(job.input_path), str(job.result_path), str(job.progress_path), str(job.cancel_path)]
+        if large_input:
+            profile = temp_dir / "profile"
+            for kind, relative in (
+                ("RESOURCES", ""), ("CONFIG", "config"), ("SCRIPTS", "scripts"),
+                ("DATAFILES", "datafiles"), ("EXTENSIONS", "extensions"),
+            ):
+                directory = profile / relative
+                directory.mkdir(parents=True, exist_ok=True)
+                env[f"BLENDER_USER_{kind}"] = str(directory)
+            command = [
+                str(executable), "--background", "--factory-startup", "--disable-autoexec", "--offline-mode",
+                "--python-exit-code", "1", "--python", str(worker_path), "--", "--large", *arguments,
+            ]
+        else:
+            command = [str(executable), str(worker_path), *arguments]
         stderr_handle = job.stderr_path.open("wb")
     except Exception:
         _cleanup_job_files(job)
         raise
     try:
         job.process = subprocess.Popen(
-            [
-                str(python_executable),
-                str(worker_path),
-                str(job.input_path),
-                str(job.result_path),
-                str(job.progress_path),
-                str(job.cancel_path),
-            ],
+            command,
             cwd=str(repo_root),
             env=env,
             stdout=stderr_handle,
@@ -534,11 +552,14 @@ def _engine_input_payload(engine_input) -> dict:
             "guide_curve_names": list(engine_input.settings.guide_curve_names),
             "density_attribute_name": engine_input.settings.density_attribute_name,
             "density_scale": engine_input.settings.density_scale,
+            "topology_mode": engine_input.settings.topology_mode,
         },
         "guide_curves": [
             {
                 "name": guide.name,
                 "splines": [[list(point) for point in spline] for spline in guide.splines],
+                "kind": list(guide.kind),
+                "closed": list(guide.closed),
             }
             for guide in engine_input.guide_curves
         ],
@@ -576,20 +597,22 @@ def _write_json(path: Path, payload: dict) -> None:
     os.replace(temp_path, path)
 
 
-def _source_geometry_fingerprint(obj) -> tuple:
+def _source_geometry_fingerprint(obj) -> str:
     mesh = obj.data
-    return (
-        tuple(tuple(float(component) for component in vertex.co) for vertex in mesh.vertices),
-        tuple(tuple(polygon.vertices) for polygon in mesh.polygons),
-        tuple(
-            (
-                tuple(sorted(edge.vertices)),
-                bool(edge.use_seam),
-                bool(getattr(edge, "use_edge_sharp", False)),
-            )
-            for edge in mesh.edges
-        ),
-    )
+    digest = hashlib.sha256()
+    # 큰 입력의 변경 감지에 좌표·면 튜플을 한 벌 더 보관하지 않는다.
+    for collection, attribute, stride, typecode in (
+        (mesh.vertices, "co", 3, "f"),
+        (mesh.loops, "vertex_index", 1, "i"),
+        (mesh.polygons, "loop_total", 1, "i"),
+        (mesh.edges, "vertices", 2, "i"),
+    ):
+        values = array(typecode, [0]) * (len(collection) * stride)
+        collection.foreach_get(attribute, values)
+        digest.update(len(values).to_bytes(8, "little"))
+        digest.update(values.tobytes())
+    digest.update(bytes(int(edge.use_seam) | (int(getattr(edge, "use_edge_sharp", False)) << 1) for edge in mesh.edges))
+    return digest.hexdigest()
 
 
 def _source_input_fingerprint(obj, scene) -> tuple:
@@ -601,7 +624,8 @@ def _source_input_fingerprint(obj, scene) -> tuple:
         props.density_attribute_name,
         float(props.density_scale),
         tuple(float(value) for value in density_values),
-        tuple((guide.name, guide.splines) for guide in guides),
+        tuple((guide.name, guide.splines, guide.kind, guide.closed) for guide in guides),
+        getattr(props, "topology_mode", "AUTO"),
         bool(props.symmetry_x),
         bool(props.symmetry_y),
         bool(props.symmetry_z),

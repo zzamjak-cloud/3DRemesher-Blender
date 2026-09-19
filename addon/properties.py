@@ -4,9 +4,19 @@ import bpy
 
 
 class Zzamjak3DRemesherProperties(bpy.types.PropertyGroup):
+    topology_mode: bpy.props.EnumProperty(
+        name="토폴로지 생성 방식",
+        description="격자 경로를 우선 사용하거나 특정 경로만 실행합니다",
+        items=(
+            ("AUTO", "자동", "지원되는 형상에는 연속 격자를 사용하고 나머지는 실험 엔진 사용 사실을 알립니다"),
+            ("STRUCTURED", "격자 전용", "격자 배치를 만들 수 없는 형상은 결과를 생성하지 않습니다"),
+            ("LEGACY", "실험 엔진", "기존 적응형 삼각 패치 엔진을 사용합니다"),
+        ),
+        default="AUTO",
+    )
     target_quad_count: bpy.props.IntProperty(
         name="목표 쿼드 수",
-        description="적응형 리메시 엔진이 맞추려고 시도할 목표 쿼드 개수",
+        description="격자·위상 제약 안에서 맞추려고 시도할 쿼드 개수",
         default=5000,
         min=4,
         soft_max=100000,

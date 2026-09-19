@@ -2,10 +2,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from math import isfinite, sqrt
-from typing import Callable, Iterable, Sequence
+from typing import Callable, Iterable, Literal, Sequence
 
 
 Vector3 = tuple[float, float, float]
+GuideKind = Literal["LOOP", "STRIP", "DIRECTION"]
+GUIDE_KIND_LOOP: GuideKind = "LOOP"
+GUIDE_KIND_STRIP: GuideKind = "STRIP"
+GUIDE_KIND_DIRECTION: GuideKind = "DIRECTION"
+GUIDE_KIND_VALUES = (GUIDE_KIND_LOOP, GUIDE_KIND_STRIP, GUIDE_KIND_DIRECTION)
+TOPOLOGY_MODES = ("AUTO", "STRUCTURED", "LEGACY")
 
 
 @dataclass(frozen=True)
@@ -16,6 +22,10 @@ class RemeshSettings:
     guide_curve_names: tuple[str, ...] = field(default_factory=tuple)
     density_attribute_name: str = "remesh_density"
     density_scale: float = 1.0
+    topology_mode: str = "AUTO"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "topology_mode", str(self.topology_mode).strip().upper())
 
     def validate(self) -> None:
         if self.target_quad_count < 4:
@@ -29,6 +39,8 @@ class RemeshSettings:
             raise ValueError("하드 엣지 각도는 0도에서 180도 사이여야 합니다.")
         if not isfinite(self.density_scale) or self.density_scale <= 0.0:
             raise ValueError("밀도 배율은 0보다 커야 합니다.")
+        if self.topology_mode not in TOPOLOGY_MODES:
+            raise ValueError(f"지원하지 않는 위상 모드입니다: {self.topology_mode}")
 
 
 @dataclass(frozen=True)
@@ -92,6 +104,29 @@ class MeshAnalysis:
 class GuideCurveData:
     name: str
     splines: tuple[tuple[Vector3, ...], ...]
+    kind: tuple[str, ...] = field(default_factory=tuple)
+    closed: tuple[bool, ...] = field(default_factory=tuple)
+
+    def __post_init__(self) -> None:
+        spline_count = len(self.splines)
+        raw_closed = tuple(bool(value) for value in self.closed)
+        raw_kind = tuple(str(value).strip().upper() for value in self.kind)
+        if raw_closed and len(raw_closed) != spline_count:
+            raise ValueError(f"{self.name} 가이드 closed 메타데이터 수가 스플라인 수와 다릅니다.")
+        if raw_kind and len(raw_kind) != spline_count:
+            raise ValueError(f"{self.name} 가이드 kind 메타데이터 수가 스플라인 수와 다릅니다.")
+        closed = raw_closed or tuple(value == GUIDE_KIND_LOOP for value in raw_kind) or (False,) * spline_count
+        kind = raw_kind or tuple(GUIDE_KIND_LOOP if value else GUIDE_KIND_DIRECTION for value in closed)
+        invalid_kind = sorted(set(kind) - set(GUIDE_KIND_VALUES))
+        if invalid_kind:
+            raise ValueError(f"{self.name} 가이드 kind가 지원되지 않습니다: {', '.join(invalid_kind)}")
+        for index, (guide_kind, is_closed) in enumerate(zip(kind, closed)):
+            if guide_kind == GUIDE_KIND_LOOP and not is_closed:
+                raise ValueError(f"{self.name} {index}번 LOOP 가이드는 닫힌 스플라인이어야 합니다.")
+            if guide_kind in {GUIDE_KIND_STRIP, GUIDE_KIND_DIRECTION} and is_closed:
+                raise ValueError(f"{self.name} {index}번 {guide_kind} 가이드는 열린 스플라인이어야 합니다.")
+        object.__setattr__(self, "kind", tuple(kind))
+        object.__setattr__(self, "closed", tuple(closed))
 
     @property
     def points(self) -> tuple[Vector3, ...]:

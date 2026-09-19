@@ -5,7 +5,14 @@ from math import degrees, isfinite
 import bpy
 from mathutils.geometry import interpolate_bezier
 
-from .core import GuideCurveData, MeshData, RemeshSettings
+from .core import (
+    GUIDE_KIND_DIRECTION,
+    GUIDE_KIND_LOOP,
+    GUIDE_KIND_VALUES,
+    GuideCurveData,
+    MeshData,
+    RemeshSettings,
+)
 
 
 def mesh_data_from_object(obj) -> MeshData:
@@ -38,6 +45,7 @@ def settings_from_scene(scene) -> RemeshSettings:
         guide_curve_names=tuple(_guide_curve_names(scene)),
         density_attribute_name=props.density_attribute_name,
         density_scale=props.density_scale,
+        topology_mode=getattr(props, "topology_mode", "AUTO"),
     )
 
 
@@ -55,11 +63,17 @@ def collect_guide_curves(scene, target_obj=None) -> tuple[GuideCurveData, ...]:
         if obj.type != "CURVE" or not obj.name.startswith("REMESH_GUIDE_"):
             continue
         splines = []
+        kind = []
+        closed = []
+        object_kind = _guide_kind_from_object(obj)
         for spline in obj.data.splines:
+            is_closed = bool(getattr(spline, "use_cyclic_u", False))
             points = _sample_curve_spline(obj, spline, target_inverse)
             if points:
                 splines.append(tuple(points))
-        guides.append(GuideCurveData(name=obj.name, splines=tuple(splines)))
+                kind.append(object_kind or (GUIDE_KIND_LOOP if is_closed else GUIDE_KIND_DIRECTION))
+                closed.append(is_closed)
+        guides.append(GuideCurveData(name=obj.name, splines=tuple(splines), kind=tuple(kind), closed=tuple(closed)))
     return tuple(guides)
 
 
@@ -150,6 +164,25 @@ def _sample_curve_spline(obj, spline, target_inverse):
     if spline.type == "BEZIER":
         return tuple(_sample_bezier_points(obj, spline, target_inverse))
     raise ValueError(f"{obj.name}의 {spline.type} 가이드 스플라인은 아직 지원하지 않습니다.")
+
+
+def _guide_kind_from_object(obj) -> str | None:
+    for owner in (obj, obj.data):
+        for key in ("remesh_guide_kind", "guide_kind", "zzamjak_guide_kind"):
+            if key in owner:
+                return _normalize_guide_kind(owner[key], f"{obj.name} {key}")
+    suffix = obj.name.removeprefix("REMESH_GUIDE_")
+    token = suffix.split("_", 1)[0]
+    if token.upper() in GUIDE_KIND_VALUES:
+        return token.upper()
+    return None
+
+
+def _normalize_guide_kind(value, label: str) -> str:
+    guide_kind = str(value).strip().upper()
+    if guide_kind not in GUIDE_KIND_VALUES:
+        raise ValueError(f"{label} 값은 LOOP, STRIP, DIRECTION 중 하나여야 합니다.")
+    return guide_kind
 
 
 def _sample_bezier_points(obj, spline, target_inverse):

@@ -41,6 +41,7 @@ def mirror_symmetry(mesh: MeshData, axes: tuple[str, ...]) -> MeshData:
 
     tolerance = _mesh_tolerance(mesh)
     axis_indices = tuple(AXIS_INDEX[axis] for axis in canonical_axes)
+    weldable_axis_vertices = _axis_weldable_vertices(mesh, axis_indices, tolerance)
     vertices: list[Vector3] = []
     vertex_map: dict[tuple[int, tuple[tuple[int, float], ...]], int] = {}
     faces: list[tuple[int, ...]] = []
@@ -54,7 +55,7 @@ def mirror_symmetry(mesh: MeshData, axes: tuple[str, ...]) -> MeshData:
 
         for source_index, vertex in enumerate(mesh.vertices):
             mirrored = _mirror_vertex(vertex, transform)
-            key = _mirror_vertex_key(source_index, vertex, transform, tolerance)
+            key = _mirror_vertex_key(source_index, vertex, transform, weldable_axis_vertices, tolerance)
             output_index = vertex_map.get(key)
             if output_index is None:
                 output_index = len(vertices)
@@ -267,10 +268,47 @@ def _mirror_vertex(vertex: Vector3, transform: dict[int, float]) -> Vector3:
     return tuple(values)
 
 
-def _mirror_vertex_key(source_index: int, vertex: Vector3, transform: dict[int, float], tolerance: float) -> tuple[int, tuple[tuple[int, float], ...]]:
+def _axis_weldable_vertices(
+    mesh: MeshData,
+    axis_indices: Sequence[int],
+    tolerance: float,
+) -> dict[int, frozenset[int]]:
+    edge_counts: dict[tuple[int, int], int] = {}
+    for face in mesh.faces:
+        for first, second in _face_edges(face):
+            edge = _edge_key(first, second)
+            edge_counts[edge] = edge_counts.get(edge, 0) + 1
+
+    weldable: dict[int, set[int]] = {axis_index: set() for axis_index in axis_indices}
+    for (first, second), count in edge_counts.items():
+        if count != 1:
+            continue
+        for axis_index in axis_indices:
+            if (
+                _on_axis_plane(mesh.vertices[first], axis_index, tolerance)
+                and _on_axis_plane(mesh.vertices[second], axis_index, tolerance)
+            ):
+                weldable[axis_index].update((first, second))
+    for face in mesh.faces:
+        for axis_index in axis_indices:
+            if all(_on_axis_plane(mesh.vertices[index], axis_index, tolerance) for index in face):
+                weldable[axis_index].update(face)
+    return {axis_index: frozenset(indices) for axis_index, indices in weldable.items()}
+
+
+def _mirror_vertex_key(
+    source_index: int,
+    vertex: Vector3,
+    transform: dict[int, float],
+    weldable_axis_vertices: dict[int, frozenset[int]],
+    tolerance: float,
+) -> tuple[int, tuple[tuple[int, float], ...]]:
     signs = []
     for axis_index, sign in sorted(transform.items()):
-        if _on_axis_plane(vertex, axis_index, tolerance):
+        if (
+            _on_axis_plane(vertex, axis_index, tolerance)
+            and source_index in weldable_axis_vertices.get(axis_index, frozenset())
+        ):
             continue
         signs.append((axis_index, sign))
     return source_index, tuple(signs)
