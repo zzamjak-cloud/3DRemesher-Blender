@@ -218,14 +218,22 @@ def _try_structured_remesh(
     from .topology.quality import EdgePathExpectation, LayoutExpectations, measure_bidirectional_sample_distance, validate_layout
     from .topology.planar import try_remesh_planar
     from .topology.periodic import try_remesh_periodic
+    from .topology.triangulated_limb import try_remesh_triangulated_limb
+    from .topology.branch_t import try_remesh_branch_t
+    from .topology.face_patch import try_remesh_face_patch
     from .topology.guided_surface import try_remesh_guided_surface
+    from .topology.components import try_remesh_components
 
     source = engine_input.mesh
     _validate_topology(source, engine_input.settings.hard_edge_angle_degrees)
     for label, builder in (
         ("평면 격자", try_remesh_planar),
         ("주기 격자", try_remesh_periodic),
+        ("삼각 튜브 격자", try_remesh_triangulated_limb),
+        ("연결된 사각 T 격자", try_remesh_branch_t),
+        ("가이드 얼굴 패치", try_remesh_face_patch),
         ("가이드 곡면 격자", try_remesh_guided_surface),
+        ("분리 표면 격자", try_remesh_components),
     ):
         _check_cancelled(cancelled)
         _report(progress, 0.08, f"{label} 배치 탐색")

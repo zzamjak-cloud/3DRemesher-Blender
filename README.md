@@ -1,6 +1,6 @@
 # 3D Remesher
 
-게임 모델용 쿼드 리토폴로지를 목표로 개발 중인 Blender Extension입니다. **공개 0.3.0은 실험 엔진입니다. 로컬 개발본에는 큐브형 평면 패치, 열린 튜브의 격자 생성, 삼각화된 규칙 격자의 제한적인 얼굴 루프 복원 경로가 추가됐습니다. 임의의 캐릭터에서 눈·입·관절 및 몸통 연결부에 새 루프를 설계하는 기능은 아직 구현되지 않았습니다.** 원본을 보존하고 결과를 별도 오브젝트로 만듭니다. 현재 로컬 코드의 큰 입력 경로는 미지원 형상에 임시 Blender Decimate 프록시를 사용합니다.
+게임 모델용 쿼드 리토폴로지를 목표로 개발 중인 Blender Extension입니다. **공개 0.3.0은 실험 엔진입니다. 로컬 개발본에는 평면 패치와 열린 튜브 격자, 삼각화된 규칙 격자의 복원, 제한된 단일 구형 두부에 눈·입·코·귀 가이드 폐루프 여섯 개를 새로 배치하는 경로가 있습니다. 사각 축에 정렬된 단일 T형 몸통·팔에도 첫 연결형 격자를 만듭니다. 실제 얼굴의 해부학 구조와 일반 캐릭터의 둥근 팔·관절 전이는 아직 구현되지 않았습니다.** 원본을 보존하고 결과를 별도 오브젝트로 만듭니다. 현재 로컬 코드의 큰 입력 경로는 미지원 형상에 임시 Blender Decimate 프록시를 사용합니다.
 
 핵심 생성 방식을 [루프·격자 중심의 새 엔진 설계](docs/topology-redesign.md)로 재설계했습니다. 아래 표는 로컬 개발본의 실제 범위를 나타냅니다.
 
@@ -8,13 +8,14 @@
 
 | 항목 | 구현 방식 |
 | --- | --- |
-| 연속 격자 | 네 경계의 공평면 패치를 공유 분할 수로 연결합니다. 열린 튜브는 닫힌 단면 링과 길이 방향 열을 생성하며, 굽거나 가늘어지는 독립 튜브도 구조 검사를 통과했습니다. 삼각화 전부터 규칙 격자가 있던 닫힌 합성 얼굴은 세 폐루프를 확인하며 쿼드를 복원합니다. 일반 얼굴의 새 배치와 몸통 연결부는 미지원입니다. |
+| 연속 격자 | 네 경계의 공평면 패치를 공유 분할 수로 연결합니다. 독립된 열린 삼각 튜브는 입력 삼각 연결과 별도로 닫힌 단면 링과 길이 방향 열을 생성합니다. 단일 구형 두부에는 앞·양측의 세 큐브 투영면에 눈 둘·입·코·귀 둘의 `LOOP` 여섯 개를 배치합니다. 사각 축 정렬 T형 몸통·팔에는 첫 연결형 격자를 만듭니다. 실제 눈·입·코·귀 개구부와 일반 관절 형상은 미지원입니다. |
+| 분리된 메시 조각 | 각 조각이 위 격자 생성기의 지원 형상일 때만 따로 처리합니다. 가이드는 가까운 단일 표면에 명확히 대응해야 합니다. 면적에 따라 목표 수를 나누고, 서로 접하는 조각의 정점을 병합하지 않습니다. 임모탈의 복잡한 다중 조각은 미지원입니다. |
 | 생성 방식 선택 | `자동`은 격자를 우선 사용하고 미지원 형상에는 실험 엔진으로 처리한 사실을 경고합니다. `격자 전용`은 미지원 형상에서 중단합니다. `실험 엔진`은 기존 경로를 선택합니다. |
 | 목표 쿼드 수·폴리곤 감소 | 적응형 삼각 메시 축소·분할, 결과 개수에 따른 예산 보정 |
 | 대칭 X/Y/Z | 로컬 양의 축 영역 절단, 미러, 중앙 경계 정점 공유 |
 | 특징선 | sharp/seam, 경계와 면 사이 각도를 보존 |
 | 방향 정렬 | 특징선·곡률·가이드 4방향장, 패치 선택과 정점 정렬. 연속 루프 설계는 미구현 |
-| Guide Curves | 열린 기본 커브는 방향 힌트입니다. 원통 단면의 닫힌 `LOOP`와 양끝까지 이어지는 길이 방향 `STRIP`은 출력 링·엣지 열로 고정합니다. 삼각화된 규칙 격자의 독립 `LOOP` 세 개도 확인합니다. 다른 필수 경로를 보존할 수 없으면 중단합니다. |
+| Guide Curves | 열린 기본 커브는 방향 힌트입니다. 독립된 열린 튜브의 닫힌 `LOOP`와 양끝까지 이어지는 `STRIP`은 출력 링·엣지 열로 고정합니다. 지원되는 단일 두부의 눈·입·코·귀 `LOOP` 여섯 개와 사각 T형 몸통·팔의 세 `LOOP`는 각각 독립된 폐경로로 만듭니다. 다른 필수 경로를 보존할 수 없으면 중단합니다. |
 | Vertex Paint 밀도 | `remesh_density` 값을 엣지 축소·분할 비용에 반영 |
 | 원본 표면 | 내부 정점 재투영, 격자 경로의 양방향 표면 표본 편차 측정 |
 | 큰 입력 처리 | 지원되는 격자 형상은 원본에서 직접 배치합니다. 그 외에 기존 엔진 한도를 넘으면 격리된 background Blender에서 임시 프록시를 만들고 자체 쿼드 엔진으로 처리합니다. |
@@ -99,6 +100,10 @@ python3 -m unittest discover -s tests -p 'test_*.py' -v
 ./scripts/dev_run.sh --background --python tests/blender_structured_worker.py
 ./scripts/dev_run.sh --background --python tests/blender_guided_worker.py
 ./scripts/dev_run.sh --background --python tests/blender_guided_surface_worker.py
+./scripts/dev_run.sh --background --python tests/blender_face_patch_worker.py
+./scripts/dev_run.sh --background --python tests/blender_triangulated_limb_worker.py
+./scripts/dev_run.sh --background --python tests/blender_component_worker.py
+./scripts/dev_run.sh --background --python tests/blender_branch_t_worker.py
 ./scripts/dev_run.sh --python tests/blender_modal.py
 python3 scripts/build_extension.py --blender-binary /Applications/Blender.app/Contents/MacOS/Blender
 ```
