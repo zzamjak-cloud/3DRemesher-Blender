@@ -40,7 +40,7 @@ def main() -> None:
         "형상 보존 제약으로 목표 쿼드 수와 실제 개수가 크게 다를 수 있습니다. "
         "캐릭터의 눈·입·관절 루프 및 변형 품질은 별도 검토가 필요합니다. "
         "UV·웨이트·셰이프 키 전송과 NURBS 가이드는 지원하지 않습니다. "
-        "Windows와 Blender 4.2 런타임은 아직 검증하지 않았습니다.\n"
+        "Blender 4.2.0·5.2.0 Linux CI와 macOS 5.2.0에서 검증했습니다. Windows 런타임은 아직 검증하지 않았습니다.\n"
     )
     (dist / "release-notes.md").write_text(notes, encoding="utf-8")
     print(f"릴리스 입력 검증 완료: {package.name}, sha256:{digest}")

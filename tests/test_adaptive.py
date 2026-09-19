@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from math import fsum
 
 from addon.adaptive import adapt_triangles
 from addon.core import MeshData, RemeshCancelled, analyze_mesh
@@ -360,11 +361,11 @@ def _count_faces_left_of(mesh: MeshData, threshold: float) -> int:
 
 
 def _count_faces_positive_x(mesh: MeshData) -> int:
-    return sum(1 for face in mesh.faces if sum(mesh.vertices[index][0] for index in face) / 3.0 >= 0.0)
+    return sum(1 for face in mesh.faces if fsum(mesh.vertices[index][0] for index in face) / 3.0 >= 0.0)
 
 
 def _count_faces_negative_x(mesh: MeshData) -> int:
-    return sum(1 for face in mesh.faces if sum(mesh.vertices[index][0] for index in face) / 3.0 < 0.0)
+    return sum(1 for face in mesh.faces if fsum(mesh.vertices[index][0] for index in face) / 3.0 < 0.0)
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
-from math import cos, isfinite, pi, sqrt
+from math import cos, fsum, isfinite, pi, sqrt
 from typing import Callable, Sequence
 
 from .core import MeshData, RemeshCancelled, Vector3, analyze_mesh
@@ -95,7 +95,8 @@ def adapt_triangles(
     elif target_triangles > _active_face_count(faces):
         _increase_mesh(vertices, densities, quadrics, faces, hard_edges, target_triangles, density_scale, cancelled, progress)
 
-    if density_values and _has_density_contrast(densities) and _active_face_count(faces) == target_triangles:
+    # 형상 제약으로 목표 수에 도달하지 못해도 현재 면 수를 유지하며 밀도를 재분배한다.
+    if density_values and _has_density_contrast(densities):
         _redistribute_density(vertices, densities, quadrics, faces, hard_edges, density_scale, max_collapse_rms, cancelled, progress, surface, surface_limit)
 
     _compact(vertices, densities, faces, hard_edges)
@@ -315,7 +316,8 @@ def _redistribute_density(
                 continue
             if len(incident_faces) != collapse_plan.removed_count:
                 continue
-            score = _distance_squared(vertices[edge[0]], vertices[edge[1]]) * _edge_density(densities, edge, density_scale)
+            density = _edge_density(densities, edge, density_scale)
+            score = _distance_squared(vertices[edge[0]], vertices[edge[1]]) * density * density
             split_options.append((score, edge, incident_faces))
         if not split_options:
             return
@@ -338,7 +340,7 @@ def _surface_safe_collapse(vertices, faces, topology, plan, surface, limit):
         if plan.keep in face and plan.remove in face:
             continue
         points=[plan.new_point if v in (plan.keep,plan.remove) else vertices[v] for v in face]
-        samples.append(tuple(sum(p[a] for p in points)/3 for a in range(3)))
+        samples.append(tuple(fsum(p[a] for p in points) / 3 for a in range(3)))
         samples.extend(_midpoint(points[j],points[(j+1)%3]) for j in range(3))
     return all(surface.nearest(p)[1] <= limit for p in samples)
 

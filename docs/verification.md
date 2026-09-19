@@ -1,6 +1,6 @@
 # 0.3.0 검증 결과
 
-2026-09-19, macOS의 실제 Blender 5.2.0 LTS에서 검증했습니다. 이 결과는 구현한 기능과 처리 경로의 검증이며 상용 도구 수준의 캐릭터 엣지 루프·변형 품질을 보증하지 않습니다.
+2026-09-19, macOS의 실제 Blender 5.2.0 LTS와 Linux CI의 Blender 4.2.0·5.2.0에서 검증했습니다. 아래 모델 수치는 macOS에서 측정했습니다. 이 결과는 구현한 기능과 처리 경로의 검증이며 상용 도구 수준의 캐릭터 엣지 루프·변형 품질을 보증하지 않습니다.
 
 ## 통과한 검사
 
@@ -45,8 +45,7 @@
 ## 설치용 산출물
 
 - 파일: `dist/zzamjak_3d_remesher-v0.3.0.zip`
-- 크기: 55,811 바이트
-- SHA-256: `9aa5917981753f8efcd6361a966bd177a0ce60e9204ea051a2a67fbeab689734`
+- 배포본 크기·SHA-256: [v0.3.0 Release의 ZIP 및 SHA256SUMS](https://github.com/zzamjak-cloud/3DRemesher-Blender/releases/tag/v0.3.0)
 - 포함: manifest, GPL 전문, 루트 등록 모듈, `addon/*.py`
 - 제외: 개발 스크립트·테스트·문서·CI·캐시
 
@@ -54,7 +53,7 @@
 
 ## 미검증 범위
 
-- Windows 런타임과 Blender 4.2 런타임. Windows 실행기는 BOM, 인자 전달, Junction 보호와 종료 코드 전달을 정적으로 검사했습니다.
+- Windows 런타임. Windows 실행기는 BOM, 인자 전달, Junction 보호와 종료 코드 전달을 정적으로 검사했습니다.
 - 사용자 제공 캐릭터의 눈·입·관절 루프와 실제 리깅·애니메이션 품질.
 - 대형 스캔 입력의 실용적인 처리 시간. 선언된 입력·출력 상한은 성능 보장이 아닙니다.
 - 사용자 프로필 ZIP 설치와 원격 Actions·Release·Extension 업데이트. 이번 작업은 로컬 구현·검증·패키징입니다.
