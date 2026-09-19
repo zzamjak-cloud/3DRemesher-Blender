@@ -807,6 +807,9 @@ def _density_surface_limit(
     # 고밀도 영역의 허용 편차를 좁혀 형상 한계에서도 세부 면을 남긴다.
     # 저밀도 영역도 기존 전역 표면 편차 기준을 완화하지 않는다.
     density = _edge_density(densities, edge, density_scale)
+    if density == 0.0:
+        # 극단적인 대비 지수로 저밀도 가중치가 언더플로해도 전역 기준은 유지한다.
+        return surface_limit
     return surface_limit * min(1.0, sqrt(reference_density / density))
 
 

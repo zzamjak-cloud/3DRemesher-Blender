@@ -129,6 +129,18 @@ class AdaptiveTriangleTests(unittest.TestCase):
         deviations=[abs(sqrt((sqrt(v[0]**2+v[1]**2)-1.)**2+v[2]**2)-.32) for v in density_result.vertices]
         self.assertLess(max(deviations), .07)
 
+    def test_extreme_density_contrast_keeps_valid_mesh(self):
+        mesh = _grid_mesh(5, 3, hard_boundary=True)
+        density = tuple(0.05 for _ in mesh.vertices)
+
+        result, _, _ = adapt_triangles(mesh, 20, density, density_scale=1000.0)
+
+        result.validate()
+        analysis = analyze_mesh(result)
+        self.assertEqual(analysis.non_manifold_edge_count, 0)
+        self.assertEqual(analysis.degenerate_face_count, 0)
+        self.assertLess(len(result.faces), len(mesh.faces))
+
     def test_accumulated_quadric_minimizes_original_plane_error(self):
         from addon.adaptive import _plane_quadric, _add_quadrics, _best_edge_point, _quadric_error
         q=_add_quadrics(_plane_quadric((0.,0.,1.,0.)),_plane_quadric((0.,0.,1.,-.1)))
