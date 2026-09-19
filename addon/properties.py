@@ -6,12 +6,12 @@ import bpy
 class Zzamjak3DRemesherProperties(bpy.types.PropertyGroup):
     target_quad_count: bpy.props.IntProperty(
         name="목표 쿼드 수",
-        description="리토폴로지 엔진에 전달할 목표 쿼드 개수",
+        description="실험 엔진이 가장 가까운 분할 수로 맞추려고 시도할 목표 쿼드 개수",
         default=5000,
         min=4,
         soft_max=100000,
     )
-    symmetry_x: bpy.props.BoolProperty(name="X", default=True)
+    symmetry_x: bpy.props.BoolProperty(name="X", default=False)
     symmetry_y: bpy.props.BoolProperty(name="Y", default=False)
     symmetry_z: bpy.props.BoolProperty(name="Z", default=False)
     hard_edge_angle: bpy.props.FloatProperty(
@@ -34,4 +34,7 @@ class Zzamjak3DRemesherProperties(bpy.types.PropertyGroup):
         min=0.01,
         soft_max=10.0,
     )
-    last_report: bpy.props.StringProperty(name="최근 분석", default="아직 분석하지 않았습니다.")
+    run_busy: bpy.props.BoolProperty(name="실행 중", default=False)
+    run_progress: bpy.props.FloatProperty(name="진행률", default=0.0, min=0.0, max=1.0, subtype="FACTOR")
+    run_progress_message: bpy.props.StringProperty(name="진행 상태", default="대기 중")
+    last_report: bpy.props.StringProperty(name="최근 상태", default="아직 실행하지 않았습니다.")

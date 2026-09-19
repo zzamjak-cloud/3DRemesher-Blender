@@ -6,6 +6,7 @@ import os
 import sys
 import tomllib
 from pathlib import Path
+from types import SimpleNamespace
 
 import bpy
 
@@ -39,6 +40,8 @@ def read_bl_info_version(init_path: Path) -> str:
 def main():
     module = importlib.import_module(ADDON_MODULE)
     adapter = importlib.import_module(f"{ADDON_MODULE}.addon.blender_adapter")
+    operators = importlib.import_module(f"{ADDON_MODULE}.addon.operators")
+    core = importlib.import_module(f"{ADDON_MODULE}.addon.core")
     assert_true(ADDON_MODULE in bpy.context.preferences.addons, "애드온이 활성화되지 않았습니다.")
 
     repo_root = Path(os.environ["REMESHER_DEV_ROOT"]).resolve()
@@ -123,16 +126,102 @@ def main():
     result = bpy.ops.object.zzamjak_3d_remesher_analyze()
     assert_true(result == {"FINISHED"}, "메시 분석 실패")
     assert_true("쿼드 1" in props.last_report, "분석 결과가 예상과 다릅니다.")
+    assert_true("대칭 X" in props.last_report, "미지원 대칭 설정 알림이 없습니다.")
 
     original_vertices = tuple(tuple(vertex.co) for vertex in mesh.vertices)
     original_faces = tuple(tuple(polygon.vertices) for polygon in mesh.polygons)
+    original_matrix = obj.matrix_world.copy()
+    original_material = bpy.data.materials.new("SmokeMaterial")
+    obj.data.materials.append(original_material)
+
+    class FakeBackend:
+        def build_input(self, mesh_data, settings, guide_curves=(), density_values=()):
+            return core.build_engine_input(mesh_data, settings, guide_curves, density_values)
+
+        def remesh(self, engine_input, *, progress=None, cancelled=None):
+            if progress is not None:
+                progress(0.5, "테스트 리메시")
+            if cancelled is not None and cancelled():
+                raise RuntimeError("취소됨")
+            result_mesh = core.MeshData(
+                vertices=((0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)),
+                faces=((0, 1, 2, 3),),
+                hard_edges=frozenset({(0, 1)}),
+            )
+            quality = SimpleNamespace(
+                target_quad_count=engine_input.settings.target_quad_count,
+                actual_quad_count=1,
+                quad_ratio=1.0,
+                boundary_edge_count=4,
+                non_manifold_edge_count=0,
+                degenerate_face_count=0,
+                max_aspect_ratio=1.0,
+                mean_aspect_ratio=1.0,
+            )
+            return SimpleNamespace(
+                mesh=result_mesh,
+                quality=quality,
+                warnings=("테스트 경고",),
+                unsupported_controls=("density",),
+            )
+
+    original_backend = operators.RemeshBackend
+    operators.RemeshBackend = FakeBackend
     result = bpy.ops.object.zzamjak_3d_remesher_run()
-    assert_true(result == {"CANCELLED"}, "미구현 엔진은 성공으로 보고되면 안 됩니다.")
-    assert_true("아직 구현" in props.last_report, "미구현 상태 메시지가 없습니다.")
+    operators.RemeshBackend = original_backend
+    assert_true(result == {"FINISHED"}, "리메시 실행 실패")
     assert_true(tuple(tuple(vertex.co) for vertex in mesh.vertices) == original_vertices, "미구현 실행이 원본 정점을 바꾸면 안 됩니다.")
     assert_true(tuple(tuple(polygon.vertices) for polygon in mesh.polygons) == original_faces, "미구현 실행이 원본 면을 바꾸면 안 됩니다.")
+    assert_true(obj.matrix_world == original_matrix, "리메시 실행이 원본 변환을 바꾸면 안 됩니다.")
+    assert_true(obj.data.materials[0] == original_material, "리메시 실행이 원본 머티리얼을 바꾸면 안 됩니다.")
+    result_obj = bpy.context.object
+    assert_true(result_obj is not obj, "결과가 원본 오브젝트를 재사용하면 안 됩니다.")
+    assert_true(result_obj.type == "MESH", "결과 오브젝트가 메시가 아닙니다.")
+    assert_true(result_obj.data is not obj.data, "결과가 원본 메시 데이터를 재사용하면 안 됩니다.")
+    assert_true(result_obj.matrix_world == original_matrix, "결과 오브젝트 변환이 원본과 다릅니다.")
+    assert_true(result_obj.data.materials[0] == original_material, "결과 오브젝트에 원본 머티리얼이 복사되지 않았습니다.")
+    assert_true("목표 쿼드 수: 12" in props.last_report, "목표 쿼드 수가 보고되지 않았습니다.")
+    assert_true("실제 쿼드 수: 1" in props.last_report, "실제 쿼드 수가 보고되지 않았습니다.")
 
+    obj.select_set(True)
+    result_obj.select_set(False)
+    bpy.context.view_layer.objects.active = obj
+    object_names_before_failure = set(bpy.data.objects.keys())
+    mesh_names_before_failure = set(bpy.data.meshes.keys())
+    selection_before_failure = tuple(bpy.context.selected_objects)
+    active_before_failure = bpy.context.view_layer.objects.active
+
+    class FailingBackend(FakeBackend):
+        def remesh(self, engine_input, *, progress=None, cancelled=None):
+            raise ValueError("의도된 실패")
+
+    operators.RemeshBackend = FailingBackend
+    try:
+        assert_cancelled(bpy.ops.object.zzamjak_3d_remesher_run, "의도된 실패")
+    finally:
+        operators.RemeshBackend = original_backend
+    assert_true(set(bpy.data.objects.keys()) == object_names_before_failure, "실패한 리메시가 오브젝트를 남겼습니다.")
+    assert_true(set(bpy.data.meshes.keys()) == mesh_names_before_failure, "실패한 리메시가 메시 데이터블록을 남겼습니다.")
+    assert_true(tuple(bpy.context.selected_objects) == selection_before_failure, "실패한 리메시가 선택 상태를 바꿨습니다.")
+    assert_true(bpy.context.view_layer.objects.active == active_before_failure, "실패한 리메시가 활성 오브젝트를 바꿨습니다.")
+
+    dummy_job = operators._RunJob(
+        source_name=obj.name,
+        source_pointer=obj.as_pointer(),
+        source_mesh_pointer=obj.data.as_pointer(),
+        source_geometry_fingerprint=operators._source_geometry_fingerprint(obj),
+        scene_pointer=bpy.context.scene.as_pointer(),
+        warnings=(),
+        temp_dir=Path(os.environ["REMESHER_DEV_PROFILE"]) / "dummy_cancel_job",
+        input_path=Path(os.environ["REMESHER_DEV_PROFILE"]) / "dummy_cancel_job" / "input.json",
+        result_path=Path(os.environ["REMESHER_DEV_PROFILE"]) / "dummy_cancel_job" / "result.json",
+        progress_path=Path(os.environ["REMESHER_DEV_PROFILE"]) / "dummy_cancel_job" / "progress.json",
+        cancel_path=Path(os.environ["REMESHER_DEV_PROFILE"]) / "dummy_cancel_job" / "cancel",
+        stderr_path=Path(os.environ["REMESHER_DEV_PROFILE"]) / "dummy_cancel_job" / "worker.log",
+    )
+    operators._ACTIVE_JOB = dummy_job
     module.unregister()
+    assert_true(operators._ACTIVE_JOB is None, "unregister 후 실행 작업 상태가 남아 있습니다.")
     assert_true(not hasattr(bpy.types.Scene, "zzamjak_3d_remesher"), "unregister 후 Scene 속성이 남아 있습니다.")
     module.register()
     assert_true(hasattr(bpy.types.Scene, "zzamjak_3d_remesher"), "register 후 Scene 속성이 없습니다.")

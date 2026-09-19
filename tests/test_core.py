@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import unittest
 
-from addon.core import GuideCurveData, MeshData, RemeshBackend, RemeshSettings, analyze_mesh, build_engine_input
+from addon.core import GuideCurveData, MeshData, RemeshBackend, RemeshResult, RemeshSettings, analyze_mesh, build_engine_input
 
 
 class CoreTests(unittest.TestCase):
@@ -79,15 +79,19 @@ class CoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "좌표"):
             build_engine_input(mesh, RemeshSettings(), guide_curves=(guide,))
 
-    def test_backend_marks_remesh_unimplemented(self):
+    def test_backend_returns_result(self):
         mesh = MeshData(
             vertices=((0, 0, 0), (1, 0, 0), (0, 1, 0)),
             faces=((0, 1, 2),),
         )
-        engine_input = RemeshBackend().build_input(mesh, RemeshSettings(target_quad_count=8))
+        engine_input = RemeshBackend().build_input(mesh, RemeshSettings(target_quad_count=4))
 
-        with self.assertRaisesRegex(NotImplementedError, "아직 구현"):
-            RemeshBackend().remesh(engine_input)
+        result = RemeshBackend().remesh(engine_input)
+
+        self.assertIsInstance(result, RemeshResult)
+        self.assertEqual(result.quality.target_quad_count, 4)
+        self.assertEqual(result.quality.quad_ratio, 1.0)
+        self.assertIn("실제 쿼드", result.summary_ko())
 
 
 if __name__ == "__main__":

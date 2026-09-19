@@ -26,7 +26,14 @@ def main() -> int:
 
     manifest = tomllib.loads((ROOT / "blender_manifest.toml").read_text(encoding="utf-8"))
     assert manifest["id"] == ADDON_ID
-    assert manifest["version"] == "0.1.0"
+    metadata = ast.parse((ROOT / "__init__.py").read_text(encoding="utf-8"))
+    bl_info = next(
+        ast.literal_eval(node.value)
+        for node in metadata.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "bl_info" for target in node.targets)
+    )
+    assert manifest["version"] == ".".join(map(str, bl_info["version"]))
     assert manifest["type"] == "add-on"
     assert "SPDX:GPL-3.0-or-later" in manifest["license"]
 

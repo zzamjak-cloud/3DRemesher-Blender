@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from math import isfinite, sqrt
-from typing import Iterable, Sequence
+from typing import Callable, Iterable, Sequence
 
 
 Vector3 = tuple[float, float, float]
@@ -107,6 +107,50 @@ class EngineInput:
     density_values: tuple[float, ...] = field(default_factory=tuple)
 
 
+@dataclass(frozen=True)
+class RemeshQuality:
+    target_quad_count: int
+    actual_quad_count: int
+    quad_ratio: float
+    boundary_edge_count: int
+    non_manifold_edge_count: int
+    degenerate_face_count: int
+    max_aspect_ratio: float
+    mean_aspect_ratio: float
+
+    def summary_ko(self) -> str:
+        return (
+            f"목표 쿼드 {self.target_quad_count}, 실제 쿼드 {self.actual_quad_count}, "
+            f"쿼드 비율 {self.quad_ratio:.1%}, 경계 엣지 {self.boundary_edge_count}, "
+            f"비다양체 엣지 {self.non_manifold_edge_count}, 퇴화 면 {self.degenerate_face_count}, "
+            f"최대 종횡비 {self.max_aspect_ratio:.2f}, 평균 종횡비 {self.mean_aspect_ratio:.2f}"
+        )
+
+
+@dataclass(frozen=True)
+class RemeshResult:
+    mesh: MeshData
+    quality: RemeshQuality
+    warnings: tuple[str, ...] = field(default_factory=tuple)
+    unsupported_controls: tuple[str, ...] = field(default_factory=tuple)
+
+    def summary_ko(self) -> str:
+        suffix = ""
+        if self.warnings:
+            suffix = f" 경고 {len(self.warnings)}개."
+        if self.unsupported_controls:
+            suffix += f" 미지원 제어: {', '.join(self.unsupported_controls)}."
+        return f"{self.quality.summary_ko()}.{suffix}"
+
+
+class RemeshCancelled(RuntimeError):
+    pass
+
+
+ProgressCallback = Callable[[float, str], None]
+CancelledCallback = Callable[[], bool]
+
+
 def analyze_mesh(mesh: MeshData) -> MeshAnalysis:
     mesh.validate()
     edge_face_counts = _edge_face_counts(mesh.faces)
@@ -170,8 +214,16 @@ class RemeshBackend:
     ) -> EngineInput:
         return build_engine_input(mesh, settings, guide_curves, density_values)
 
-    def remesh(self, engine_input: EngineInput) -> MeshData:
-        raise NotImplementedError("전문 쿼드 리메시 엔진은 아직 구현되지 않았습니다.")
+    def remesh(
+        self,
+        engine_input: EngineInput,
+        *,
+        progress: ProgressCallback | None = None,
+        cancelled: CancelledCallback | None = None,
+    ) -> RemeshResult:
+        from .engine import remesh
+
+        return remesh(engine_input, progress=progress, cancelled=cancelled)
 
 
 def _edge_face_counts(faces: Iterable[Sequence[int]]) -> dict[tuple[int, int], int]:
