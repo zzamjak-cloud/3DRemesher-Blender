@@ -1,9 +1,9 @@
 schema_version = "1.0.0"
 
 id = "zzamjak_3d_remesher"
-version = "0.2.0"
+version = "0.3.0"
 name = "3D Remesher"
-tagline = "특징선을 보존하는 실험 쿼드 메시 생성 도구"
+tagline = "대칭과 밀도를 제어하는 적응형 쿼드 리토폴로지"
 maintainer = "zzamjak-cloud"
 type = "add-on"
 

@@ -1,10 +1,10 @@
 bl_info = {
     "name": "3D Remesher",
     "author": "zzamjak-cloud",
-    "version": (0, 2, 0),
+    "version": (0, 3, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > 3D Remesher",
-    "description": "특징선을 보존하는 실험 쿼드 메시 생성 도구",
+    "description": "대칭과 밀도를 제어하는 적응형 쿼드 리토폴로지",
     "category": "Mesh",
 }
 

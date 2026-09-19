@@ -113,12 +113,17 @@ def _serialize_object(value) -> dict:
             for name in (
                 "target_quad_count",
                 "actual_quad_count",
+                "target_error_ratio",
                 "quad_ratio",
                 "boundary_edge_count",
                 "non_manifold_edge_count",
                 "degenerate_face_count",
                 "max_aspect_ratio",
                 "mean_aspect_ratio",
+                "max_surface_error",
+                "mean_surface_error",
+                "symmetry_error",
+                "field_alignment",
             )
             if hasattr(value, name)
         }

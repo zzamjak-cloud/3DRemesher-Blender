@@ -15,6 +15,7 @@ import bpy
 from .blender_adapter import (
     build_result_object,
     collect_guide_curves,
+    density_values_from_mesh,
     ensure_density_attribute,
     format_input_report,
     format_result_report,
@@ -68,11 +69,12 @@ def _build_engine_input(context, obj):
     if obj.modifiers:
         warnings.append("모디파이어는 적용하지 않고 원본 로컬 메시 데이터를 사용했습니다.")
     backend = RemeshBackend()
+    density_values = density_values_from_mesh(obj.data, settings.density_attribute_name, 1.0)
     engine_input = backend.build_input(
         mesh_data_from_object(obj),
         settings,
         collect_guide_curves(context.scene, obj),
-        (),
+        density_values,
     )
     return engine_input, tuple(warnings)
 
@@ -129,7 +131,7 @@ def cancel_active_job() -> None:
 class ZJREMESH_OT_analyze(bpy.types.Operator):
     bl_idname = "object.zzamjak_3d_remesher_analyze"
     bl_label = "메시 분석"
-    bl_description = "선택한 메시를 현재 실험 엔진 입력으로 변환하고 품질 지표를 계산합니다"
+    bl_description = "선택한 메시를 적응형 리메시 엔진 입력으로 변환하고 품질 지표를 계산합니다"
     bl_options = {"REGISTER"}
 
     def execute(self, context):
@@ -184,7 +186,7 @@ class ZJREMESH_OT_prepare_density(bpy.types.Operator):
 class ZJREMESH_OT_run(bpy.types.Operator):
     bl_idname = "object.zzamjak_3d_remesher_run"
     bl_label = "리메시 실행"
-    bl_description = "현재 실험 엔진으로 별도 리메시 오브젝트를 생성합니다"
+    bl_description = "적응형 리메시 엔진으로 별도 리메시 오브젝트를 생성합니다"
     bl_options = {"REGISTER", "UNDO"}
 
     _job = None
@@ -318,8 +320,8 @@ class ZJREMESH_OT_run(bpy.types.Operator):
                 props.last_report = "원본 메시 오브젝트를 찾을 수 없어 결과를 만들지 않았습니다."
                 self.report({"ERROR"}, props.last_report)
                 return {"CANCELLED"}
-            if source_obj.data.as_pointer() != job.source_mesh_pointer or _source_geometry_fingerprint(source_obj) != job.source_geometry_fingerprint:
-                props.last_report = "원본 메시가 실행 중 변경되어 결과를 만들지 않았습니다."
+            if source_obj.data.as_pointer() != job.source_mesh_pointer or _source_input_fingerprint(source_obj, context.scene) != job.source_geometry_fingerprint:
+                props.last_report = "원본 입력이 실행 중 변경되어 결과를 만들지 않았습니다."
                 self.report({"ERROR"}, props.last_report)
                 return {"CANCELLED"}
             result_payload = _read_job_result(job)
@@ -418,7 +420,7 @@ def _start_worker_job(source_obj, scene, engine_input, warnings: tuple[str, ...]
         source_name=source_obj.name,
         source_pointer=source_obj.as_pointer(),
         source_mesh_pointer=source_obj.data.as_pointer(),
-        source_geometry_fingerprint=_source_geometry_fingerprint(source_obj),
+        source_geometry_fingerprint=_source_input_fingerprint(source_obj, scene),
         scene_pointer=scene.as_pointer(),
         warnings=warnings,
         temp_dir=temp_dir,
@@ -579,7 +581,32 @@ def _source_geometry_fingerprint(obj) -> tuple:
     return (
         tuple(tuple(float(component) for component in vertex.co) for vertex in mesh.vertices),
         tuple(tuple(polygon.vertices) for polygon in mesh.polygons),
-        tuple(tuple(sorted(edge.vertices)) for edge in mesh.edges),
+        tuple(
+            (
+                tuple(sorted(edge.vertices)),
+                bool(edge.use_seam),
+                bool(getattr(edge, "use_edge_sharp", False)),
+            )
+            for edge in mesh.edges
+        ),
+    )
+
+
+def _source_input_fingerprint(obj, scene) -> tuple:
+    props = scene.zzamjak_3d_remesher
+    density_values = density_values_from_mesh(obj.data, props.density_attribute_name, 1.0)
+    guides = collect_guide_curves(scene, obj)
+    return (
+        _source_geometry_fingerprint(obj),
+        props.density_attribute_name,
+        float(props.density_scale),
+        tuple(float(value) for value in density_values),
+        tuple((guide.name, guide.splines) for guide in guides),
+        bool(props.symmetry_x),
+        bool(props.symmetry_y),
+        bool(props.symmetry_z),
+        float(props.hard_edge_angle),
+        int(props.target_quad_count),
     )
 
 

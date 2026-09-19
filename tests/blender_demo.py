@@ -7,11 +7,11 @@ from mathutils import Vector
 
 
 def main():
-    scene = bpy.data.scenes.new("3D Remesher 실험 엔진")
+    scene = bpy.data.scenes.new("3D Remesher 적응형 엔진")
     bpy.context.window.scene = scene
-    bpy.ops.mesh.primitive_ico_sphere_add(subdivisions=2, radius=1.5, location=(-2.0, 0.0, 0.0))
+    bpy.ops.mesh.primitive_ico_sphere_add(subdivisions=4, radius=1.5, location=(-2.0, 0.0, 0.0))
     source = bpy.context.object
-    source.name = "원본 — 삼각형 80개"
+    source.name = "원본 — 삼각형 1280개"
     source.show_wire = True
     source.show_all_edges = True
     original_vertices = tuple(tuple(vertex.co) for vertex in source.data.vertices)
@@ -20,7 +20,7 @@ def main():
     props.symmetry_x = False
     props.symmetry_y = False
     props.symmetry_z = False
-    props.target_quad_count = 200
+    props.target_quad_count = 256
     result = bpy.ops.object.zzamjak_3d_remesher_run()
     assert result == {"FINISHED"}, result
     output = bpy.context.object

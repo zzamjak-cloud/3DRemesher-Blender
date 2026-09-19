@@ -22,19 +22,6 @@ def mesh_data_from_object(obj) -> MeshData:
 
 def settings_from_scene(scene) -> RemeshSettings:
     props = scene.zzamjak_3d_remesher
-    return RemeshSettings(
-        target_quad_count=props.target_quad_count,
-        symmetry_axes=(),
-        hard_edge_angle_degrees=degrees(props.hard_edge_angle),
-        guide_curve_names=tuple(_guide_curve_names(scene)),
-        density_attribute_name=props.density_attribute_name,
-        density_scale=props.density_scale,
-    )
-
-
-def unsupported_control_warnings(scene) -> tuple[str, ...]:
-    props = scene.zzamjak_3d_remesher
-    warnings = []
     axes = tuple(
         axis
         for axis, enabled in (
@@ -44,10 +31,18 @@ def unsupported_control_warnings(scene) -> tuple[str, ...]:
         )
         if enabled
     )
-    if axes:
-        warnings.append(f"대칭 {', '.join(axes)} 설정은 준비 중이라 이번 실행에는 적용하지 않았습니다.")
-    warnings.append("밀도 속성은 현재 준비 기능만 제공하며 엔진 입력에는 적용하지 않았습니다.")
-    return tuple(warnings)
+    return RemeshSettings(
+        target_quad_count=props.target_quad_count,
+        symmetry_axes=axes,
+        hard_edge_angle_degrees=degrees(props.hard_edge_angle),
+        guide_curve_names=tuple(_guide_curve_names(scene)),
+        density_attribute_name=props.density_attribute_name,
+        density_scale=props.density_scale,
+    )
+
+
+def unsupported_control_warnings(scene) -> tuple[str, ...]:
+    return ()
 
 
 def collect_guide_curves(scene, target_obj=None) -> tuple[GuideCurveData, ...]:
@@ -138,7 +133,7 @@ def format_result_report(remesh_result, extra_warnings: tuple[str, ...] = ()) ->
 def format_input_report(engine_input, extra_warnings: tuple[str, ...] = ()) -> str:
     lines = [
         engine_input.analysis.summary_ko(),
-        f"목표 쿼드 수: {engine_input.settings.target_quad_count} (가장 가까운 분할 수)",
+        f"목표 쿼드 수: {engine_input.settings.target_quad_count} (위상·특징선에 따라 실제 개수 차이)",
     ]
     if extra_warnings:
         lines.append("알림:")
@@ -197,20 +192,27 @@ def _format_quality_lines(quality) -> list[str]:
     field_labels = (
         ("target_quad_count", "목표 쿼드 수"),
         ("actual_quad_count", "실제 쿼드 수"),
+        ("target_error_ratio", "목표 오차율"),
         ("quad_ratio", "쿼드 비율"),
         ("boundary_edge_count", "경계 엣지"),
         ("non_manifold_edge_count", "비다양체 엣지"),
         ("degenerate_face_count", "퇴화 면"),
         ("max_aspect_ratio", "최대 종횡비"),
         ("mean_aspect_ratio", "평균 종횡비"),
+        ("max_surface_error", "최대 표면 오차"),
+        ("mean_surface_error", "평균 표면 오차"),
+        ("symmetry_error", "대칭 오차"),
+        ("field_alignment", "필드 정렬도"),
     )
     lines = []
     for field_name, label in field_labels:
         if not hasattr(quality, field_name):
             continue
         value = getattr(quality, field_name)
-        if field_name == "quad_ratio":
+        if field_name in {"quad_ratio", "target_error_ratio", "field_alignment"}:
             lines.append(f"{label}: {value:.1%}")
+        elif field_name in {"max_surface_error", "mean_surface_error", "symmetry_error"}:
+            lines.append(f"{label}: {value:.6g}")
         elif isinstance(value, float):
             lines.append(f"{label}: {value:.3f}")
         else:
@@ -222,7 +224,7 @@ def _control_label(control: str) -> str:
     labels = {
         "density": "밀도 입력",
         "density_attribute": "밀도 입력",
-        "density_scale": "밀도 배율",
+        "density_scale": "밀도 대비",
         "symmetry": "대칭",
         "symmetry_axes": "대칭 축",
         "target_quad_count": "정확한 목표 쿼드 수",
@@ -239,16 +241,20 @@ def density_values_from_mesh(mesh, attribute_name: str, scale: float = 1.0) -> t
     if attribute is None:
         if generic_attribute is not None:
             raise ValueError(f"'{attribute_name}' 속성이 밀도 컬러 속성이 아닙니다.")
-        return ()
+        return tuple(1.0 * scale for _vertex in mesh.vertices)
     if attribute.domain != "POINT" or getattr(attribute, "data_type", "FLOAT_COLOR") != "FLOAT_COLOR":
         raise ValueError(f"'{attribute_name}' 속성은 점 도메인 FLOAT_COLOR여야 합니다.")
     values = []
     for index, color in enumerate(attribute.data):
-        value = float(color.color[0]) * scale
+        red, green, blue = (float(color.color[0]), float(color.color[1]), float(color.color[2]))
+        value = (0.2126 * red + 0.7152 * green + 0.0722 * blue) * scale
         if not isfinite(value):
             raise ValueError(f"{index}번 밀도 값은 유한한 숫자여야 합니다.")
         values.append(value)
     return tuple(values)
+
+
+extract_density_values = density_values_from_mesh
 
 
 def ensure_density_attribute(mesh, attribute_name: str):

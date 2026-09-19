@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict, deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from math import cos, sqrt
 from typing import Sequence
 
@@ -27,6 +27,7 @@ MAX_SOURCE_CORNERS = 50000
 MAX_FACE_VERTICES = 256
 MAX_GUIDE_SEGMENTS = 20000
 MAX_OUTPUT_QUADS = 200000
+MAX_SURFACE_ERROR_RATIO = 0.04
 MAX_SUBDIVISION_SEGMENTS = 128
 
 
@@ -50,97 +51,153 @@ def remesh(
     *,
     progress: ProgressCallback | None = None,
     cancelled: CancelledCallback | None = None,
+    _quality_attempt: int = 0,
 ) -> RemeshResult:
-    mesh = engine_input.mesh
+    from .adaptive import adapt_triangles
+    from .field import solve_field, optimize_quads
+    from .surface import SurfaceIndex
+    from .symmetry import clip_to_symmetry, mirror_symmetry
+
     settings = engine_input.settings
-    warnings: list[str] = []
-    unsupported_controls = _unsupported_controls(engine_input)
-
-    _check_cancelled(cancelled)
-    _report(progress, 0.02, "입력 검증")
     settings.validate()
-    mesh.validate()
-    _validate_size(mesh)
+    engine_input.mesh.validate()
+    _validate_size(engine_input.mesh)
+    _check_cancelled(cancelled)
+    _report(progress, 0.01, "입력과 특징선 검증")
+    source = engine_input.mesh
+    scale = max(max(v[a] for v in source.vertices)-min(v[a] for v in source.vertices) for a in range(3))
+    if scale <= 0:
+        raise ValueError("입력 메시의 크기가 0입니다.")
+    mesh = MeshData(tuple(_scale(v,1/scale) for v in source.vertices), source.faces, source.hard_edges)
     topology = _validate_topology(mesh, settings.hard_edge_angle_degrees)
-
-    if unsupported_controls:
-        warnings.append(
-            "대칭 또는 밀도 제어는 현재 엔진에서 적용되지 않았습니다: "
-            + ", ".join(unsupported_controls)
-        )
-
+    mesh = _triangulated(mesh, topology.feature_edges)
+    density = engine_input.density_values
+    if settings.symmetry_axes:
+        mesh, density = clip_to_symmetry(mesh, density, settings.symmetry_axes)
+        mesh = _triangulated(mesh, mesh.hard_edges)
+        _validate_topology(mesh, 180.)
+    reference = mesh
+    surface = SurfaceIndex(reference)
+    guides = tuple((_scale(a,1/scale),_scale(b,1/scale)) for a,b in _guide_segments(engine_input.guide_curves))
+    # 대칭 축 중 표면 전체가 평면 위에 있는 축은 복제 배수에서 제외한다.
+    axes = tuple(sorted(set(settings.symmetry_axes)))
+    factor = 2**sum(any(abs(v['XYZ'.index(a)])>1e-9 for v in reference.vertices) for a in axes)
+    capped_target = min(settings.target_quad_count, MAX_OUTPUT_QUADS)
+    sector_target = max(1, round(capped_target/factor))
+    warnings = []
+    if capped_target != settings.target_quad_count:
+        warnings.append(f"출력 상한 {MAX_OUTPUT_QUADS}쿼드에 맞춰 목표를 제한했습니다.")
+    if axes:
+        warnings.append("대칭은 오브젝트 로컬 원점의 양의 축 영역을 기준으로 생성했습니다.")
+    best = None
+    budget = max(1, round(sector_target/2.2))
+    tried = set()
+    alternatives = []
+    for attempt in range(4):
+        _check_cancelled(cancelled)
+        if budget in tried:
+            break
+        tried.add(budget)
+        _report(progress, .08+attempt*.12, f"목표 수와 밀도에 맞춰 재표본화 {attempt+1}/4")
+        adapted, _, notes = adapt_triangles(reference, budget, density, density_scale=settings.density_scale, cancelled=cancelled,
+            progress=lambda fraction,message: _report(progress,.08+attempt*.12+.10*fraction,message))
+        adapted, _ = optimize_quads(adapted, surface, guides, iterations=0, cancelled=cancelled)
+        adapted_topology = _validate_topology(adapted, 180.)
+        field = solve_field(adapted, guides, cancelled=cancelled)
+        patches = _build_patches(adapted, adapted_topology, guides, field)
+        vertices, faces, hard = _patches_to_quads(adapted, patches, adapted.hard_edges)
+        candidate = MeshData(tuple(vertices),tuple(faces),frozenset(hard))
+        # 모든 삼각형이 사각형으로 짝지어졌으면 추가 분할 없는 출력도 비교한다.
+        if all(len(p.vertices)==4 for p in patches):
+            direct=MeshData(adapted.vertices,tuple(p.vertices for p in patches),adapted.hard_edges)
+            alternatives.append(max(1,round(len(adapted.faces)*sector_target/len(direct.faces))))
+            if abs(len(direct.faces)-sector_target)<abs(len(candidate.faces)-sector_target):
+                candidate=direct
+                faces=direct.faces
+        elif any(len(p.vertices)==4 for p in patches):
+            # 특징선으로 나뉜 영역의 홀수 삼각형 수를 바꿀 이웃 예산도 시도한다.
+            alternatives.append(len(adapted.faces)+sum(len(p.vertices)==3 for p in patches))
+        delta = abs(len(faces)-sector_target)
+        rank = (len(faces)*factor > MAX_OUTPUT_QUADS, delta)
+        if best is None or rank < best[0]:
+            best = (rank,candidate,notes)
+        if not rank[0] and delta <= sector_target*.015:
+            break
+        revised = max(1,round(len(adapted.faces)*sector_target/max(1,len(faces))))
+        if revised == budget:
+            revised += 1 if len(faces)<sector_target else -1
+        budget = max(1,revised)
+        if budget in tried:
+            budget = next((item for item in alternatives if item not in tried),budget)
+    if best is None:
+        raise ValueError("목표에 맞는 쿼드 패치를 생성하지 못했습니다.")
+    _, output, notes = best
+    if notes:
+        warnings.append("특징선과 경계 보존 제약으로 일부 면 개수 조정을 제한했습니다.")
+    _report(progress,.64,"방향장 최적화와 원본 표면 재투영")
+    output, field_score = optimize_quads(output,surface,guides,cancelled=cancelled)
+    _validate_topology(output,180.)
+    # 정점뿐 아니라 면 중심을 포함해 원본 삼각 표면과의 편차를 측정한다.
+    distances=[]
+    samples=list(output.vertices)+[_centroid([output.vertices[v] for v in f]) for f in output.faces]
+    for i,p in enumerate(samples):
+        if i%256==0:
+            _check_cancelled(cancelled)
+        distances.append(surface.nearest(p)[1]*scale)
+    if max(distances,default=0.) > MAX_SURFACE_ERROR_RATIO*scale:
+        if _quality_attempt < 2 and settings.target_quad_count < MAX_OUTPUT_QUADS:
+            _report(progress,.82,"형상 보존을 위해 해상도 보정")
+            refined_input=replace(engine_input,settings=replace(settings,target_quad_count=min(MAX_OUTPUT_QUADS,settings.target_quad_count*2)))
+            refined=remesh(refined_input,progress=progress,cancelled=cancelled,_quality_attempt=_quality_attempt+1)
+            refined_quality=replace(refined.quality,target_quad_count=settings.target_quad_count,
+                target_error_ratio=abs(refined.quality.actual_quad_count-settings.target_quad_count)/settings.target_quad_count)
+            refined_warnings=tuple(w for w in refined.warnings if "target=" not in w)
+            refined_warnings += (f"표면 편차 제한을 지키기 위해 목표보다 해상도를 높였습니다: target={settings.target_quad_count}, actual={refined_quality.actual_quad_count}",)
+            return replace(refined,quality=refined_quality,warnings=tuple(dict.fromkeys(refined_warnings)))
+        raise ValueError("원본 대비 표면 편차가 크므로 안전한 결과를 만들지 못했습니다. 목표 쿼드 수를 높이거나 밀도 대비를 낮춰 주세요.")
+    _report(progress,.86,"대칭 복원과 출력 검증")
+    if axes:
+        output=mirror_symmetry(output,axes)
+    _validate_topology(output,180.)
+    if len(output.faces)>MAX_OUTPUT_QUADS:
+        raise ValueError("특징선과 대칭을 보존한 결과가 출력 상한을 초과했습니다. 목표 수를 낮춰 주세요.")
+    analysis=analyze_mesh(output)
+    if analysis.non_manifold_edge_count or analysis.degenerate_face_count or analysis.quad_ratio!=1:
+        raise ValueError("출력 토폴로지 검증에 실패하여 결과 적용을 중단했습니다.")
+    max_aspect,mean_aspect=_quad_aspect_stats(output.vertices,output.faces)
+    error=abs(analysis.quad_count-settings.target_quad_count)/settings.target_quad_count
+    if analysis.quad_count!=settings.target_quad_count:
+        warnings.append(f"위상·특징선·대칭 제약으로 목표와 실제 개수가 다릅니다: target={settings.target_quad_count}, actual={analysis.quad_count} ({error:.1%})")
+    if max(distances,default=0.) > .02*scale:
+        warnings.append("원본 대비 표면 편차가 크므로 목표 수를 높이거나 결과 형상을 확인하세요.")
+    symmetry_error=_symmetry_error(output,axes)*scale
+    output=MeshData(tuple(_scale(v,scale) for v in output.vertices),output.faces,output.hard_edges)
     _check_cancelled(cancelled)
-    _report(progress, 0.18, "면 패치 생성")
-    guide_segments = _guide_segments(engine_input.guide_curves)
-    patches = _build_patches(mesh, topology, guide_segments)
-
-    _check_cancelled(cancelled)
-    _report(progress, 0.44, "기본 쿼드 생성")
-    base_vertices, base_quads, base_hard_edges = _patches_to_quads(mesh, patches, topology.output_hard_edges)
-    if not base_quads:
-        raise ValueError("쿼드로 변환할 수 있는 패치가 없습니다.")
-    if len(base_quads) > MAX_OUTPUT_QUADS:
-        raise ValueError(f"기본 쿼드 수가 출력 상한을 초과합니다: {len(base_quads)} > {MAX_OUTPUT_QUADS}")
-
-    segments, predicted_count = _choose_subdivision_segments(len(base_quads), settings.target_quad_count)
-    _check_cancelled(cancelled)
-    _report(progress, 0.68, "균일 세분화")
-    output_vertices, output_faces, output_hard_edges = _subdivide_quads(
-        base_vertices,
-        base_quads,
-        base_hard_edges,
-        segments,
-        cancelled,
-    )
-
-    output_mesh = MeshData(
-        vertices=tuple(output_vertices),
-        faces=tuple(output_faces),
-        hard_edges=frozenset(output_hard_edges),
-    )
-    output_analysis = analyze_mesh(output_mesh)
-    if output_analysis.non_manifold_edge_count > 0:
-        raise ValueError("출력 메시가 비다양체 엣지를 포함해 리메시를 중단했습니다.")
-    if output_analysis.degenerate_face_count > 0:
-        raise ValueError("출력 메시가 퇴화 면을 포함해 리메시를 중단했습니다.")
-    max_aspect, mean_aspect = _quad_aspect_stats(output_mesh.vertices, output_mesh.faces)
-
-    if output_analysis.quad_count != settings.target_quad_count:
-        warnings.append(
-            f"목표 쿼드 수와 실제 쿼드 수가 다릅니다: "
-            f"target={settings.target_quad_count}, actual={output_analysis.quad_count}"
-        )
-    if output_analysis.quad_count >= engine_input.analysis.face_count:
-        warnings.append("현재 엔진은 원본 대비 면 감소나 단순화를 수행하지 않습니다.")
-    if settings.target_quad_count < len(base_quads):
-        warnings.append("목표가 기본 쿼드 수보다 작아 감소 없이 가장 낮은 세분화 결과를 반환했습니다.")
-
-    _check_cancelled(cancelled)
-    _report(progress, 1.0, "완료")
-    return RemeshResult(
-        mesh=output_mesh,
-        quality=RemeshQuality(
-            target_quad_count=settings.target_quad_count,
-            actual_quad_count=output_analysis.quad_count,
-            quad_ratio=output_analysis.quad_ratio,
-            boundary_edge_count=output_analysis.boundary_edge_count,
-            non_manifold_edge_count=output_analysis.non_manifold_edge_count,
-            degenerate_face_count=output_analysis.degenerate_face_count,
-            max_aspect_ratio=max_aspect,
-            mean_aspect_ratio=mean_aspect,
-        ),
-        warnings=tuple(warnings),
-        unsupported_controls=unsupported_controls,
-    )
+    _report(progress,1.,"완료")
+    return RemeshResult(output,RemeshQuality(
+        settings.target_quad_count,analysis.quad_count,analysis.quad_ratio,
+        analysis.boundary_edge_count,analysis.non_manifold_edge_count,analysis.degenerate_face_count,
+        max_aspect,mean_aspect,error,max(distances,default=0.),sum(distances)/max(1,len(distances)),
+        symmetry_error,field_score),tuple(dict.fromkeys(warnings)),())
 
 
-def _unsupported_controls(engine_input: EngineInput) -> tuple[str, ...]:
-    controls: list[str] = []
-    if engine_input.settings.symmetry_axes:
-        controls.append("symmetry_axes")
-    if engine_input.density_values or engine_input.settings.density_scale != 1.0:
-        controls.append("density")
-    return tuple(controls)
+def _triangulated(mesh, hard_edges):
+    faces=[]
+    for i,face in enumerate(mesh.faces):
+        faces.extend([tuple(face)] if len(face)==3 else _ear_clip_face(mesh.vertices,face,i))
+    return MeshData(mesh.vertices,tuple(faces),frozenset(hard_edges))
+
+
+def _symmetry_error(mesh, axes):
+    points={tuple(round(c,10) for c in p) for p in mesh.vertices}
+    maximum=0.
+    for axis in axes:
+        a='XYZ'.index(axis)
+        for p in mesh.vertices:
+            mirrored=tuple(-c if i==a else c for i,c in enumerate(p))
+            if tuple(round(c,10) for c in mirrored) not in points:
+                maximum=max(maximum,min(_distance(mirrored,q) for q in mesh.vertices))
+    return maximum
 
 
 def _validate_size(mesh: MeshData) -> None:
@@ -255,6 +312,7 @@ def _build_patches(
     mesh: MeshData,
     topology: _Topology,
     guide_segments: Sequence[tuple[Vector3, Vector3]],
+    field_directions: Sequence[Vector3] = (),
 ) -> list[_Patch]:
     triangle_patches: list[tuple[int, tuple[int, int, int]]] = []
     patches: list[_Patch] = []
@@ -269,7 +327,7 @@ def _build_patches(
             for triangle in triangles:
                 triangle_patches.append((face_index, triangle))
 
-    paired_triangles = _pair_triangles(mesh, triangle_patches, topology.feature_edges, guide_segments)
+    paired_triangles = _pair_triangles(mesh, triangle_patches, topology.feature_edges, guide_segments, field_directions)
     used_triangles = set(paired_triangles)
     used_triangles.update(value for pair in paired_triangles.values() for value in pair)
 
@@ -293,6 +351,7 @@ def _pair_triangles(
     triangle_patches: Sequence[tuple[int, tuple[int, int, int]]],
     feature_edges: frozenset[tuple[int, int]],
     guide_segments: Sequence[tuple[Vector3, Vector3]],
+    field_directions: Sequence[Vector3] = (),
 ) -> dict[int, tuple[int, int]]:
     edge_to_triangles: dict[tuple[int, int], list[int]] = defaultdict(list)
     for index, (_, triangle) in enumerate(triangle_patches):
@@ -305,9 +364,12 @@ def _pair_triangles(
             continue
         left, right = sorted(indices)
         quad = _quad_from_triangles(triangle_patches[left][1], triangle_patches[right][1])
-        if not _is_planar_convex(mesh.vertices, quad):
+        if not _is_surface_convex(mesh.vertices, quad):
             continue
         score = _quad_pair_score(mesh.vertices, quad, guide_segments)
+        if field_directions:
+            from .field import alignment
+            score -= 1.8*sum(alignment(mesh.vertices,quad,field_directions[triangle_patches[i][0]]) for i in (left,right))/2
         candidates.append((score, edge, left, right))
 
     candidates.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
@@ -321,7 +383,38 @@ def _pair_triangles(
         pair = (left, right)
         paired[left] = pair
         paired[right] = pair
-    return paired
+    # 짧은 교대 경로로 탐욕적 매칭의 고립 삼각형을 줄인다.
+    adjacency=defaultdict(list)
+    for score,_,left,right in candidates:
+        adjacency[left].append((score,right))
+        adjacency[right].append((score,left))
+    matches={i:(pair[1] if pair[0]==i else pair[0]) for i,pair in paired.items()}
+
+    def augment(current, path):
+        if len(path)>9:
+            return None
+        for _,neighbor in sorted(adjacency[current]):
+            if neighbor in path or matches.get(current)==neighbor:
+                continue
+            if neighbor not in matches:
+                return path+[neighbor]
+            other=matches[neighbor]
+            if other not in path:
+                found=augment(other,path+[neighbor,other])
+                if found:
+                    return found
+        return None
+
+    for start in range(len(triangle_patches)):
+        if start in matches:
+            continue
+        path=augment(start,[start])
+        if path:
+            for i in range(0,len(path),2):
+                a,b=path[i:i+2]
+                matches[a]=b
+                matches[b]=a
+    return {i:tuple(sorted((i,j))) for i,j in matches.items()}
 
 
 def _quad_from_triangles(left: Sequence[int], right: Sequence[int]) -> tuple[int, int, int, int]:
@@ -544,6 +637,19 @@ def _fallback_face_normal(vertices: Sequence[Vector3], face: Sequence[int]) -> V
             if _length(normal) > EPSILON:
                 return normal
     return (0.0, 0.0, 1.0)
+
+
+def _is_surface_convex(vertices, face):
+    normal=_normalize(_polygon_normal(vertices,face))
+    if _length(normal)<EPSILON:
+        return False
+    for i,v in enumerate(face):
+        a=_sub(vertices[v],vertices[face[i-1]])
+        b=_sub(vertices[face[(i+1)%len(face)]],vertices[v])
+        turn=(a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0])
+        if _dot(turn,normal)<=EPSILON:
+            return False
+    return not _has_self_intersections(_project_face(vertices,face))
 
 
 def _is_planar_convex(vertices: Sequence[Vector3], face: Sequence[int]) -> bool:

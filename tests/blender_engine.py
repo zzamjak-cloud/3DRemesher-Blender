@@ -51,6 +51,7 @@ def main():
     operators = importlib.import_module(f"{ADDON_MODULE}.addon.operators")
 
     obj = _make_quad("WorkerSource")
+    bpy.context.scene.zzamjak_3d_remesher.target_quad_count = 64
     engine_input, warnings = operators._build_engine_input(bpy.context, obj)
     job = operators._start_worker_job(obj, bpy.context.scene, engine_input, warnings)
     try:
@@ -69,6 +70,7 @@ def main():
     assert_true(not temp_dir.exists(), "worker 임시 디렉터리가 정리되지 않았습니다.")
 
     cancel_obj = _make_quad("WorkerCancelSource")
+    bpy.context.scene.zzamjak_3d_remesher.target_quad_count = 64
     engine_input, warnings = operators._build_engine_input(bpy.context, cancel_obj)
     cancel_job = operators._start_worker_job(cancel_obj, bpy.context.scene, engine_input, warnings)
     temp_dir = cancel_job.temp_dir
@@ -82,7 +84,7 @@ def main():
         source_name=obj.name,
         source_pointer=obj.as_pointer(),
         source_mesh_pointer=obj.data.as_pointer(),
-        source_geometry_fingerprint=operators._source_geometry_fingerprint(obj),
+        source_geometry_fingerprint=operators._source_input_fingerprint(obj, bpy.context.scene),
         scene_pointer=bpy.context.scene.as_pointer(),
         warnings=(),
         temp_dir=bad_temp_dir,
@@ -111,12 +113,17 @@ def main():
             "quality": {
                 "target_quad_count": 4,
                 "actual_quad_count": 1,
+                "target_error_ratio": 0.75,
                 "quad_ratio": 1.0,
                 "boundary_edge_count": 4,
                 "non_manifold_edge_count": 0,
                 "degenerate_face_count": 0,
                 "max_aspect_ratio": 1.0,
                 "mean_aspect_ratio": 1.0,
+                "max_surface_error": 0.0,
+                "mean_surface_error": 0.0,
+                "symmetry_error": 0.0,
+                "field_alignment": 1.0,
             },
             "warnings": ["테스트"],
             "unsupported_controls": ["density"],

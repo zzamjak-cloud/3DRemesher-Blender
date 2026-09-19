@@ -98,6 +98,11 @@ def main() -> None:
             f"{user_resource} != {profile_root}"
         )
 
+    temp_root = profile_root / "temp"
+    temp_root.mkdir(parents=True, exist_ok=True)
+    bpy.context.preferences.filepaths.temporary_directory = str(temp_root) + os.sep
+    print(f"[3D Remesher 개발] 임시·종료 복구 경로={bpy.app.tempdir}")
+
     manifest = repo_root / "blender_manifest.toml"
     if not manifest.is_file():
         raise RuntimeError(f"blender_manifest.toml을 찾을 수 없습니다: {manifest}")

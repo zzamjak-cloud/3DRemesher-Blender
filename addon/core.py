@@ -27,7 +27,7 @@ class RemeshSettings:
             raise ValueError(f"지원하지 않는 대칭 축입니다: {', '.join(invalid_axes)}")
         if not 0.0 <= self.hard_edge_angle_degrees <= 180.0:
             raise ValueError("하드 엣지 각도는 0도에서 180도 사이여야 합니다.")
-        if self.density_scale <= 0.0:
+        if not isfinite(self.density_scale) or self.density_scale <= 0.0:
             raise ValueError("밀도 배율은 0보다 커야 합니다.")
 
 
@@ -117,6 +117,11 @@ class RemeshQuality:
     degenerate_face_count: int
     max_aspect_ratio: float
     mean_aspect_ratio: float
+    target_error_ratio: float = 0.0
+    max_surface_error: float = 0.0
+    mean_surface_error: float = 0.0
+    symmetry_error: float = 0.0
+    field_alignment: float = 0.0
 
     def summary_ko(self) -> str:
         return (
@@ -186,8 +191,8 @@ def build_engine_input(
     if density_tuple and len(density_tuple) != len(mesh.vertices):
         raise ValueError("밀도 값 개수는 메시 정점 개수와 같아야 합니다.")
     for index, value in enumerate(density_tuple):
-        if not isfinite(value):
-            raise ValueError(f"{index}번 밀도 값은 유한한 숫자여야 합니다.")
+        if not isfinite(value) or value < 0:
+            raise ValueError(f"{index}번 밀도 값은 0 이상의 유한한 숫자여야 합니다.")
 
     guide_tuple = tuple(guide_curves)
     for guide in guide_tuple:

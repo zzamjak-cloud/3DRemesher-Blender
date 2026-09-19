@@ -126,7 +126,10 @@ def main():
     result = bpy.ops.object.zzamjak_3d_remesher_analyze()
     assert_true(result == {"FINISHED"}, "메시 분석 실패")
     assert_true("쿼드 1" in props.last_report, "분석 결과가 예상과 다릅니다.")
-    assert_true("대칭 X" in props.last_report, "미지원 대칭 설정 알림이 없습니다.")
+    engine_input, _warnings = operators._build_engine_input(bpy.context, obj)
+    assert_true(engine_input.settings.symmetry_axes == ("X",), "대칭 축이 엔진 입력에 전달되지 않았습니다.")
+    assert_true(len(engine_input.density_values) == len(mesh.vertices), "밀도 값이 엔진 입력에 전달되지 않았습니다.")
+    assert_true(abs(engine_input.density_values[0] - 0.25) < 1.0e-6, "밀도 컬러 속성 값이 엔진 입력과 다릅니다.")
 
     original_vertices = tuple(tuple(vertex.co) for vertex in mesh.vertices)
     original_faces = tuple(tuple(polygon.vertices) for polygon in mesh.polygons)
@@ -151,18 +154,23 @@ def main():
             quality = SimpleNamespace(
                 target_quad_count=engine_input.settings.target_quad_count,
                 actual_quad_count=1,
+                target_error_ratio=abs(engine_input.settings.target_quad_count - 1) / engine_input.settings.target_quad_count,
                 quad_ratio=1.0,
                 boundary_edge_count=4,
                 non_manifold_edge_count=0,
                 degenerate_face_count=0,
                 max_aspect_ratio=1.0,
                 mean_aspect_ratio=1.0,
+                max_surface_error=0.0,
+                mean_surface_error=0.0,
+                symmetry_error=0.0,
+                field_alignment=1.0,
             )
             return SimpleNamespace(
                 mesh=result_mesh,
                 quality=quality,
                 warnings=("테스트 경고",),
-                unsupported_controls=("density",),
+                unsupported_controls=(),
             )
 
     original_backend = operators.RemeshBackend
@@ -209,7 +217,7 @@ def main():
         source_name=obj.name,
         source_pointer=obj.as_pointer(),
         source_mesh_pointer=obj.data.as_pointer(),
-        source_geometry_fingerprint=operators._source_geometry_fingerprint(obj),
+        source_geometry_fingerprint=operators._source_input_fingerprint(obj, bpy.context.scene),
         scene_pointer=bpy.context.scene.as_pointer(),
         warnings=(),
         temp_dir=Path(os.environ["REMESHER_DEV_PROFILE"]) / "dummy_cancel_job",
