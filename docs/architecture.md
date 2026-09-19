@@ -40,7 +40,7 @@
 ## 품질 지표 해석
 
 - `target_error_ratio`: 목표 대비 실제 개수 차이의 절댓값 비율. 특징선·대칭 배수·위상 제약 때문에 0이 아닐 수 있습니다.
-- `max_surface_error` / `mean_surface_error`: 결과 정점과 면 중심에서 원본 삼각 표면까지의 최근접 거리. 오브젝트 로컬 단위이며 대칭에서는 유지한 양의 영역을 기준으로 측정합니다. 양방향 Hausdorff 거리나 면 전체 오차 상한이 아닙니다.
+- `max_surface_error` / `mean_surface_error`: 기존 실험 엔진에서는 결과 정점·면 중심에서 원본 삼각 표면까지의 거리입니다. 새 격자 경로에서는 원본과 출력의 정점·면 중심을 상대 표면에 투영한 양방향 표본 거리입니다. 둘 다 오브젝트 로컬 단위이며 면 전체의 Hausdorff 상한은 아닙니다.
 - `symmetry_error`: 반사한 정점의 대응 좌표 오차. 강제 대칭 결과는 정확하게 대응하도록 구성합니다.
 - `field_alignment`: 결과 엣지가 방향장에 얼마나 정렬되는지 0~1로 측정한 평균값. 해부학적 루프의 적합도는 아닙니다.
 - `max_aspect_ratio` / `mean_aspect_ratio`: 쿼드의 최장·최단 엣지 길이 비율.
@@ -49,7 +49,7 @@
 
 ## Blender 실행
 
-GUI 연산자는 Blender 번들 Python으로 `worker.py`를 실행하고 JSON으로 입력·진행률·결과를 교환합니다. 큰 입력은 Blender 실행 파일을 `--background --factory-startup --disable-autoexec --offline-mode`로 다시 띄워 프록시를 만듭니다. Blender 데이터 생성은 메인 스레드에서만 수행합니다. 취소, 파일 로드 및 애드온 해제 시 프로세스와 임시 파일을 정리합니다. 적용 전 원본과 사용한 입력의 변경을 확인합니다. 백그라운드 연산자는 동기 실행이며, 통합 검사에서는 실제 worker 경로도 별도로 검증합니다.
+GUI 연산자는 Blender 번들 Python으로 `worker.py`를 실행합니다. 큰 기하 입력은 little endian 바이너리 버퍼에, 버전·크기·SHA-256·입력 지문은 JSON 메타데이터에 기록합니다. 진행률과 결과는 JSON으로 교환합니다. 큰 입력은 Blender 실행 파일을 `--background --factory-startup --disable-autoexec --offline-mode`로 다시 띄워 프록시를 만듭니다. Blender 데이터 생성은 메인 스레드에서만 수행합니다. 취소, 파일 로드 및 애드온 해제 시 프로세스와 임시 파일을 정리합니다. 적용 전 원본과 사용한 입력의 변경을 확인합니다. 백그라운드 연산자는 동기 실행이며, 통합 검사에서는 실제 worker 경로도 별도로 검증합니다.
 
 [Blender의 스레딩 제한](https://docs.blender.org/api/main/info_gotchas_threading.html)에 따라 장기간 실행하는 Python 스레드를 사용하지 않습니다.
 

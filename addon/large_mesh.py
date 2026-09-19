@@ -18,7 +18,7 @@ from .core import (
     analyze_mesh,
     build_engine_input,
 )
-from .engine import MAX_SOURCE_CORNERS, MAX_SOURCE_FACES, MAX_SOURCE_VERTICES, _try_structured_remesh
+from .engine import MAX_ACCEPTED_ASPECT_RATIO, MAX_SOURCE_CORNERS, MAX_SOURCE_FACES, MAX_SOURCE_VERTICES, _try_structured_remesh
 
 
 MAX_ENGINE_TRIANGLES = 20000
@@ -55,12 +55,19 @@ def remesh_large(
     )
     if required_guides and settings.topology_mode == "LEGACY":
         raise ValueError("실험 엔진은 필수 LOOP/STRIP 가이드를 보존하지 못합니다. 격자 경로를 선택해 주세요.")
+    structured_warning = ""
     if settings.topology_mode != "LEGACY":
-        structured = _try_structured_remesh(engine_input, progress=progress, cancelled=cancelled)
+        try:
+            structured = _try_structured_remesh(engine_input, progress=progress, cancelled=cancelled)
+        except ValueError as exc:
+            if required_guides or settings.topology_mode == "STRUCTURED":
+                raise
+            structured = None
+            structured_warning = f"원본 메시의 격자 배치를 건너뛰고 임시 프록시를 사용했습니다: {exc}"
         if structured is not None:
             return structured
         if required_guides:
-            raise ValueError(f"필수 가이드의 연속 엣지 경로를 만들지 못했습니다: {', '.join(required_guides)}. 현재 LOOP/STRIP은 독립 튜브의 둘레·길이 방향만 지원합니다.")
+            raise ValueError(f"필수 가이드의 연속 엣지 경로를 만들지 못했습니다: {', '.join(required_guides)}. 현재 입력 형상에서 필수 루프와 쿼드 띠를 배치할 수 없습니다.")
         if settings.topology_mode == "STRUCTURED":
             raise ValueError("이 형상과 가이드에는 연속 격자 배치를 만들 수 없습니다. 격자 경계를 지정하거나 실험 엔진을 선택해 주세요.")
 
@@ -132,6 +139,12 @@ def remesh_large(
     _verify_explicit_features(source, output_mesh, "최종 결과")
 
     max_aspect, mean_aspect = _quad_aspect_stats(output_mesh.vertices, output_mesh.faces)
+    if max_aspect > MAX_ACCEPTED_ASPECT_RATIO:
+        raise ValueError(
+            "큰 메시 결과에 지나치게 길고 좁은 쿼드가 있어 적용을 중단했습니다: "
+            f"최대 종횡비 {max_aspect:.2f} > {MAX_ACCEPTED_ASPECT_RATIO:.0f}. "
+            "격자 경계를 지정하거나 목표 쿼드 수를 조정해 주세요."
+        )
     target = engine_input.settings.target_quad_count
     target_error = abs(analysis.quad_count - target) / max(1, target)
     symmetry_error = proxy_result.quality.symmetry_error
@@ -153,6 +166,7 @@ def remesh_large(
 
     warnings = (
         "큰 메시 경로: 원본은 변경하지 않고 임시 프록시에서 리메시했습니다.",
+        structured_warning,
         *cleanup_warnings,
         *proxy_cleanup_warnings,
         *proxy_notes,
@@ -601,10 +615,11 @@ def _quad_aspect_stats(vertices: Sequence[Vector3], faces: Sequence[tuple[int, .
         shortest = min(lengths, default=0.0)
         longest = max(lengths, default=0.0)
         ratios.append(longest / shortest if shortest > 1.0e-12 else float("inf"))
-    finite = [ratio for ratio in ratios if isfinite(ratio)]
-    if not finite:
+    if not ratios:
         return float("inf"), float("inf")
-    return max(finite), sum(finite) / len(finite)
+    if any(not isfinite(ratio) for ratio in ratios):
+        return float("inf"), float("inf")
+    return max(ratios), sum(ratios) / len(ratios)
 
 
 def _centroid(points) -> Vector3:

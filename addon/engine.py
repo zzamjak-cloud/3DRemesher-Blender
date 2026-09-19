@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import defaultdict, deque
 from dataclasses import dataclass, replace
 from math import cos, sqrt
+from statistics import median
 from typing import Sequence
 
 from .core import (
@@ -29,6 +30,7 @@ MAX_FACE_VERTICES = 256
 MAX_GUIDE_SEGMENTS = 20000
 MAX_OUTPUT_QUADS = 200000
 MAX_SURFACE_ERROR_RATIO = 0.04
+MAX_ACCEPTED_ASPECT_RATIO = 20.0
 MAX_SUBDIVISION_SEGMENTS = 128
 
 
@@ -77,7 +79,7 @@ def remesh(
         if structured is not None:
             return structured
         if required_guides:
-            raise ValueError(f"필수 가이드의 연속 엣지 경로를 만들지 못했습니다: {', '.join(required_guides)}. 현재 LOOP/STRIP은 독립 튜브의 둘레·길이 방향만 지원합니다.")
+            raise ValueError(f"필수 가이드의 연속 엣지 경로를 만들지 못했습니다: {', '.join(required_guides)}. 현재 입력 형상에서 필수 루프와 쿼드 띠를 배치할 수 없습니다.")
         if settings.topology_mode == "STRUCTURED":
             raise ValueError("이 형상과 가이드에는 연속 격자 배치를 만들 수 없습니다. 격자 경계를 지정하거나 실험 엔진을 선택해 주세요.")
     source = engine_input.mesh
@@ -183,6 +185,12 @@ def remesh(
     if analysis.non_manifold_edge_count or analysis.degenerate_face_count or analysis.quad_ratio!=1:
         raise ValueError("출력 토폴로지 검증에 실패하여 결과 적용을 중단했습니다.")
     max_aspect,mean_aspect=_quad_aspect_stats(output.vertices,output.faces)
+    if max_aspect > MAX_ACCEPTED_ASPECT_RATIO:
+        raise ValueError(
+            "결과에 지나치게 길고 좁은 쿼드가 있어 적용을 중단했습니다: "
+            f"최대 종횡비 {max_aspect:.2f} > {MAX_ACCEPTED_ASPECT_RATIO:.0f}. "
+            "격자 경계를 지정하거나 목표 쿼드 수를 조정해 주세요."
+        )
     error=abs(analysis.quad_count-settings.target_quad_count)/settings.target_quad_count
     if analysis.quad_count!=settings.target_quad_count:
         warnings.append(f"위상·특징선·대칭 제약으로 목표와 실제 개수가 다릅니다: target={settings.target_quad_count}, actual={analysis.quad_count} ({error:.1%})")
@@ -207,15 +215,17 @@ def _try_structured_remesh(
 ) -> RemeshResult | None:
     if engine_input.settings.target_quad_count > MAX_OUTPUT_QUADS:
         return None
-    from .surface import SurfaceIndex
+    from .topology.quality import EdgePathExpectation, LayoutExpectations, measure_bidirectional_sample_distance, validate_layout
     from .topology.planar import try_remesh_planar
     from .topology.periodic import try_remesh_periodic
+    from .topology.guided_surface import try_remesh_guided_surface
 
     source = engine_input.mesh
     _validate_topology(source, engine_input.settings.hard_edge_angle_degrees)
     for label, builder in (
         ("평면 격자", try_remesh_planar),
         ("주기 격자", try_remesh_periodic),
+        ("가이드 곡면 격자", try_remesh_guided_surface),
     ):
         _check_cancelled(cancelled)
         _report(progress, 0.08, f"{label} 배치 탐색")
@@ -228,21 +238,43 @@ def _try_structured_remesh(
         analysis = analyze_mesh(output)
         if analysis.quad_ratio != 1.0 or analysis.non_manifold_edge_count or analysis.degenerate_face_count:
             raise ValueError(f"{label} 결과의 위상 검증에 실패했습니다.")
+        output_edges = {_edge_key(first, second) for face in output.faces for first, second in _face_edges(face)}
+        guide_tolerance = max(
+            median(_distance(output.vertices[first], output.vertices[second]) for first, second in output_edges) * 0.75,
+            1.0e-6,
+        )
+        loops = []
+        strips = []
+        for guide in engine_input.guide_curves:
+            for index, (spline, kind) in enumerate(zip(guide.splines, guide.kind)):
+                if kind not in {"LOOP", "STRIP"}:
+                    continue
+                expectation = EdgePathExpectation(
+                    f"{guide.name}:{index}", tuple(spline),
+                    closed=kind == "LOOP", tolerance=guide_tolerance,
+                )
+                (loops if kind == "LOOP" else strips).append(expectation)
+        layout = validate_layout(output, LayoutExpectations(
+            loops=tuple(loops), strips=tuple(strips),
+            max_face_aspect_ratio=MAX_ACCEPTED_ASPECT_RATIO,
+        ))
+        if not layout.ok:
+            raise ValueError(f"{label} 결과의 배치 품질 검사에 실패했습니다: {layout.issues[0].message}")
         # 경계 엣지 수는 분할 수에 따라 달라지므로 열린/닫힌 상태만 비교한다.
         if bool(analysis.boundary_edge_count) != bool(engine_input.analysis.boundary_edge_count):
             raise ValueError(f"{label} 결과의 열린 경계가 원본과 다릅니다.")
-        _report(progress, 0.78, "원본 표면 오차 검사")
-        surface = SurfaceIndex(_triangulated(source, source.hard_edges))
-        distances = []
-        for index, point in enumerate((*output.vertices, *(_centroid([output.vertices[v] for v in face]) for face in output.faces))):
-            if index % 256 == 0:
-                _check_cancelled(cancelled)
-            distances.append(surface.nearest(point)[1])
+        _report(progress, 0.78, "양방향 원본 표면 오차 검사")
+        surface_distance = measure_bidirectional_sample_distance(source, output, cancelled=cancelled)
         scale = max(max(v[a] for v in source.vertices) - min(v[a] for v in source.vertices) for a in range(3))
-        maximum = max(distances, default=0.0)
+        maximum = surface_distance.max_distance
         if maximum > MAX_SURFACE_ERROR_RATIO * scale:
             raise ValueError(f"{label} 결과가 원본 표면에서 너무 멉니다: {maximum:.6g}")
         maximum_aspect, mean_aspect = _quad_aspect_stats(output.vertices, output.faces)
+        if maximum_aspect > MAX_ACCEPTED_ASPECT_RATIO:
+            raise ValueError(
+                f"{label} 결과에 지나치게 길고 좁은 쿼드가 있습니다: "
+                f"최대 종횡비 {maximum_aspect:.2f} > {MAX_ACCEPTED_ASPECT_RATIO:.0f}"
+            )
         target = engine_input.settings.target_quad_count
         target_error = abs(analysis.quad_count - target) / target
         symmetry_error = _symmetry_error(output, tuple(sorted(set(engine_input.settings.symmetry_axes))))
@@ -258,7 +290,8 @@ def _try_structured_remesh(
                 target, analysis.quad_count, analysis.quad_ratio,
                 analysis.boundary_edge_count, analysis.non_manifold_edge_count,
                 analysis.degenerate_face_count, maximum_aspect, mean_aspect,
-                target_error, maximum, sum(distances) / max(1, len(distances)),
+                target_error, maximum,
+                (surface_distance.mean_source_to_output + surface_distance.mean_output_to_source) / 2.0,
                 symmetry_error, 1.0,
             ),
             tuple(warnings),

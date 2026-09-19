@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import struct
 from types import SimpleNamespace
 import subprocess
 import sys
@@ -49,6 +50,13 @@ class _RunJob:
 
 
 _ACTIVE_JOB: _RunJob | None = None
+_GEOMETRY_PROTOCOL_VERSION = 1
+_GEOMETRY_BUFFER_MAGIC = b"ZJREMESH_GEOMETRY\0"
+_GEOMETRY_BUFFER_FILENAME = "geometry.bin"
+_UINT32_MAX = 2**32 - 1
+_PACK_UINT32 = struct.Struct("<I")
+_PACK_VECTOR3 = struct.Struct("<ddd")
+_PACK_FLOAT64 = struct.Struct("<d")
 
 
 def _active_mesh_object(context):
@@ -440,7 +448,7 @@ def _start_worker_job(source_obj, scene, engine_input, warnings: tuple[str, ...]
         stderr_path=temp_dir / "worker.log",
     )
     try:
-        _write_json(job.input_path, _engine_input_payload(engine_input))
+        _write_json(job.input_path, _engine_input_payload(engine_input, buffer_dir=temp_dir))
         worker_path = Path(__file__).with_name("worker.py")
         repo_root = Path(__file__).resolve().parents[1]
         env = os.environ.copy()
@@ -542,9 +550,8 @@ def _cleanup_job_files(job: _RunJob) -> None:
     shutil.rmtree(job.temp_dir, ignore_errors=True)
 
 
-def _engine_input_payload(engine_input) -> dict:
-    return {
-        "mesh": _mesh_payload(engine_input.mesh),
+def _engine_input_payload(engine_input, *, buffer_dir: Path | None = None) -> dict:
+    payload = {
         "settings": {
             "target_quad_count": engine_input.settings.target_quad_count,
             "symmetry_axes": list(engine_input.settings.symmetry_axes),
@@ -563,8 +570,16 @@ def _engine_input_payload(engine_input) -> dict:
             }
             for guide in engine_input.guide_curves
         ],
-        "density_values": list(engine_input.density_values),
     }
+    if buffer_dir is None:
+        payload["mesh"] = _mesh_payload(engine_input.mesh)
+        payload["density_values"] = list(engine_input.density_values)
+        return payload
+
+    payload["protocol_version"] = _GEOMETRY_PROTOCOL_VERSION
+    payload["geometry_buffer"] = _write_geometry_buffer(engine_input, buffer_dir)
+    payload["input_fingerprint"] = _payload_fingerprint(payload)
+    return payload
 
 
 def _mesh_payload(mesh: MeshData) -> dict:
@@ -573,6 +588,99 @@ def _mesh_payload(mesh: MeshData) -> dict:
         "faces": [list(face) for face in mesh.faces],
         "hard_edges": [list(edge) for edge in sorted(mesh.hard_edges)],
     }
+
+
+def _write_geometry_buffer(engine_input, buffer_dir: Path) -> dict:
+    buffer_dir.mkdir(parents=True, exist_ok=True)
+    path = buffer_dir / _GEOMETRY_BUFFER_FILENAME
+    temp_path = path.with_suffix(path.suffix + ".tmp")
+    writer = _HashingBinaryWriter(temp_path)
+    sections = {}
+    try:
+        writer.write(_GEOMETRY_BUFFER_MAGIC)
+        writer.write(_PACK_UINT32.pack(_GEOMETRY_PROTOCOL_VERSION))
+        sections["vertices"] = _write_vertices(writer, engine_input.mesh.vertices)
+        sections["faces"] = _write_faces(writer, engine_input.mesh.faces)
+        sections["hard_edges"] = _write_hard_edges(writer, sorted(engine_input.mesh.hard_edges))
+        sections["density_values"] = _write_density_values(writer, engine_input.density_values)
+    except Exception:
+        writer.close()
+        temp_path.unlink(missing_ok=True)
+        raise
+    writer.close()
+    os.replace(temp_path, path)
+    return {
+        "filename": path.name,
+        "sha256": writer.hexdigest,
+        "size": writer.size,
+        "byte_order": "little",
+        "sections": sections,
+    }
+
+
+class _HashingBinaryWriter:
+    def __init__(self, path: Path):
+        self._handle = path.open("wb")
+        self._digest = hashlib.sha256()
+        self.size = 0
+
+    @property
+    def hexdigest(self) -> str:
+        return self._digest.hexdigest()
+
+    def write(self, data: bytes) -> None:
+        self._handle.write(data)
+        self._digest.update(data)
+        self.size += len(data)
+
+    def close(self) -> None:
+        self._handle.close()
+
+
+def _write_vertices(writer: _HashingBinaryWriter, vertices) -> dict:
+    offset = writer.size
+    for vertex in vertices:
+        writer.write(_PACK_VECTOR3.pack(*(float(component) for component in vertex)))
+    return {"offset": offset, "count": len(vertices), "components": 3, "dtype": "float64"}
+
+
+def _write_faces(writer: _HashingBinaryWriter, faces) -> dict:
+    offset = writer.size
+    index_count = 0
+    for face in faces:
+        _write_uint32(writer, len(face), "면 정점 수")
+        index_count += len(face)
+        for index in face:
+            _write_uint32(writer, int(index), "면 정점 인덱스")
+    return {"offset": offset, "count": len(faces), "index_count": index_count, "dtype": "uint32_varlen"}
+
+
+def _write_hard_edges(writer: _HashingBinaryWriter, hard_edges) -> dict:
+    offset = writer.size
+    for edge in hard_edges:
+        _write_uint32(writer, int(edge[0]), "하드 엣지 인덱스")
+        _write_uint32(writer, int(edge[1]), "하드 엣지 인덱스")
+    return {"offset": offset, "count": len(hard_edges), "components": 2, "dtype": "uint32"}
+
+
+def _write_density_values(writer: _HashingBinaryWriter, density_values) -> dict:
+    offset = writer.size
+    for value in density_values:
+        writer.write(_PACK_FLOAT64.pack(float(value)))
+    return {"offset": offset, "count": len(density_values), "components": 1, "dtype": "float64"}
+
+
+def _write_uint32(writer: _HashingBinaryWriter, value: int, label: str) -> None:
+    if value < 0 or value > _UINT32_MAX:
+        raise ValueError(f"{label} 값이 바이너리 버퍼 범위를 벗어났습니다: {value}")
+    writer.write(_PACK_UINT32.pack(value))
+
+
+def _payload_fingerprint(payload: dict) -> str:
+    fingerprint_payload = dict(payload)
+    fingerprint_payload.pop("input_fingerprint", None)
+    data = json.dumps(fingerprint_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(data).hexdigest()
 
 
 def _deserialize_remesh_result(payload: dict):

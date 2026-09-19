@@ -79,6 +79,29 @@ def _run_remesh(obj, *, target=64, symmetry=(), density=False, guide=False, expe
     return result_obj, props.last_report
 
 
+def _expect_quality_rejection(obj, *, target=128):
+    _activate(obj)
+    props = bpy.context.scene.zzamjak_3d_remesher
+    props.target_quad_count = target
+    props.symmetry_x = False
+    props.symmetry_y = False
+    props.symmetry_z = False
+    props.density_scale = 1.0
+    _add_guide(obj)
+    before = _mesh_snapshot(obj)
+    names = set(bpy.context.scene.objects.keys())
+    try:
+        result = bpy.ops.object.zzamjak_3d_remesher_run()
+    except RuntimeError as exc:
+        assert_true("종횡비" in str(exc), f"예상과 다른 실패입니다: {exc}")
+    else:
+        assert_true(result != {"FINISHED"}, "종횡비가 큰 토러스 결과가 적용되었습니다.")
+        assert_true("종횡비" in props.last_report, f"품질 거부 사유가 없습니다: {props.last_report}")
+    _assert_source_unchanged(obj, before)
+    assert_true(set(bpy.context.scene.objects.keys()) == names, "거부된 결과 오브젝트가 남았습니다.")
+    RESULTS.append({"name": obj.name, "input_faces": len(obj.data.polygons), "target": target, "quality_rejected": props.last_report})
+
+
 def _paint_density(obj):
     mesh = obj.data
     attribute = mesh.color_attributes.get("remesh_density")
@@ -193,22 +216,11 @@ def _polygon_area(obj, vertex_indices):
     return area
 
 
-def _assert_density_bias(uniform_area, density_obj):
-    density_area = _face_stats_by_x(density_obj)
-    uniform_area_ratio = uniform_area["positive"]["mean_area"] / max(TOLERANCE, uniform_area["negative"]["mean_area"])
-    density_area_ratio = density_area["positive"]["mean_area"] / max(TOLERANCE, density_area["negative"]["mean_area"])
-    uniform_count_ratio = uniform_area["positive"]["count"] / max(1, uniform_area["negative"]["count"])
-    density_count_ratio = density_area["positive"]["count"] / max(1, density_area["negative"]["count"])
-    area_improved = density_area_ratio < uniform_area_ratio * 0.95
-    count_improved = density_count_ratio > uniform_count_ratio * 1.10
-    assert_true(
-        area_improved or count_improved,
-        (
-            "밀도 입력이 +X 영역 분포를 충분히 바꾸지 못했습니다. "
-            f"area uniform={uniform_area_ratio:.3f}, density={density_area_ratio:.3f}; "
-            f"count uniform={uniform_count_ratio:.3f}, density={density_count_ratio:.3f}"
-        ),
-    )
+def _assert_density_visible(density_obj):
+    area = _face_stats_by_x(density_obj)
+    count_ratio = area["positive"]["count"] / max(1, area["negative"]["count"])
+    area_ratio = area["positive"]["mean_area"] / max(TOLERANCE, area["negative"]["mean_area"])
+    assert_true(count_ratio > 1.10 or area_ratio < 0.95, "고밀도 영역의 출력 분포 변화가 보이지 않습니다.")
 
 
 def main():
@@ -234,9 +246,7 @@ def main():
 
     _clear_scene()
     uniform_torus = _torus()
-    uniform_result, _report = _run_remesh(uniform_torus, target=128, guide=True, expect_closed=True)
-    _assert_reduced(uniform_torus, uniform_result)
-    uniform_area = _face_stats_by_x(uniform_result)
+    _expect_quality_rejection(uniform_torus)
 
     _clear_scene()
     density_torus = _torus()
@@ -247,7 +257,7 @@ def main():
     assert_true(min(positive_values) > max(negative_values), "Blender RGB 밀도 추출이 +X와 -X를 구분하지 못했습니다.")
     density_result, _report = _run_remesh(density_torus, target=128, density=True, guide=True, expect_closed=True)
     _assert_reduced(density_torus, density_result)
-    _assert_density_bias(uniform_area, density_result)
+    _assert_density_visible(density_result)
 
     path=Path(__file__).resolve().parents[1]/"dist"/"acceptance_results.json"
     path.parent.mkdir(exist_ok=True)

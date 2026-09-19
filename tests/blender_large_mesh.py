@@ -47,21 +47,26 @@ def main():
                 raise AssertionError("큰 메시 작업이 240초 안에 완료되지 않았습니다.")
             time.sleep(0.1)
         payload = operators._read_job_result(job)
-        assert payload.get("ok"), payload
-        result = operators._deserialize_remesh_result(payload["result"])
-        assert result.quality.quad_ratio == 1.0
-        assert result.quality.degenerate_face_count == 0
-        assert result.quality.non_manifold_edge_count == 0
-        assert result.quality.symmetry_error < 1e-6
-        assert result.quality.max_surface_error <= 0.08
         assert before == operators._source_input_fingerprint(source, bpy.context.scene)
         report = {
             "source_faces": len(source.data.polygons),
-            "result_quads": result.quality.actual_quad_count,
             "seconds": time.monotonic() - started,
-            "quality": vars(result.quality),
             "source_preserved": True,
         }
+        if payload.get("ok"):
+            result = operators._deserialize_remesh_result(payload["result"])
+            assert result.quality.quad_ratio == 1.0
+            assert result.quality.degenerate_face_count == 0
+            assert result.quality.non_manifold_edge_count == 0
+            assert result.quality.symmetry_error < 1e-6
+            assert result.quality.max_surface_error <= 0.08
+            assert result.quality.max_aspect_ratio <= 20.0
+            report["result_quads"] = result.quality.actual_quad_count
+            report["quality"] = vars(result.quality)
+        else:
+            assert payload.get("error_type") == "ValueError", payload
+            assert "종횡비" in payload.get("message", ""), payload
+            report["quality_rejected"] = payload["message"]
     finally:
         operators._cleanup_job_files(job)
     assert not job.temp_dir.exists()
