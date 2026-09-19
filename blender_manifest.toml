@@ -1,0 +1,12 @@
+schema_version = "1.0.0"
+
+id = "zzamjak_3d_remesher"
+version = "0.1.0"
+name = "3D Remesher"
+tagline = "게임 메시용 자동 리토폴로지 준비 도구"
+maintainer = "zzamjak-cloud"
+type = "add-on"
+
+blender_version_min = "4.2.0"
+license = ["SPDX:GPL-3.0-or-later"]
+tags = ["Mesh", "Modeling"]

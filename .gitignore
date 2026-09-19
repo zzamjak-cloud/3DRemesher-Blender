@@ -1,0 +1,9 @@
+__pycache__/
+.pytest_cache/
+dist/
+*.pyc
+*.pyo
+.DS_Store
+.omc/
+Blender/
+tools/Blender/

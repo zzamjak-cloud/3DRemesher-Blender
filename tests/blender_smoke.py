@@ -1,0 +1,147 @@
+from __future__ import annotations
+
+import importlib
+import ast
+import os
+import sys
+import tomllib
+from pathlib import Path
+
+import bpy
+
+
+ADDON_MODULE = "bl_ext.user_default.zzamjak_3d_remesher"
+
+
+def assert_true(condition, message):
+    if not condition:
+        raise AssertionError(message)
+
+
+def assert_cancelled(operation, expected_message: str):
+    try:
+        result = operation()
+    except RuntimeError as exc:
+        assert_true(expected_message in str(exc), f"예상 오류 메시지가 아닙니다: {exc}")
+        return
+    assert_true(result == {"CANCELLED"}, "연산이 중단되지 않았습니다.")
+
+
+def read_bl_info_version(init_path: Path) -> str:
+    tree = ast.parse(init_path.read_text(encoding="utf-8"))
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "bl_info" for target in node.targets):
+            bl_info = ast.literal_eval(node.value)
+            return ".".join(str(part) for part in bl_info["version"])
+    raise AssertionError("bl_info를 찾을 수 없습니다.")
+
+
+def main():
+    module = importlib.import_module(ADDON_MODULE)
+    adapter = importlib.import_module(f"{ADDON_MODULE}.addon.blender_adapter")
+    assert_true(ADDON_MODULE in bpy.context.preferences.addons, "애드온이 활성화되지 않았습니다.")
+
+    repo_root = Path(os.environ["REMESHER_DEV_ROOT"]).resolve()
+    profile_root = Path(os.environ["REMESHER_DEV_PROFILE"]).resolve()
+    extension_id = os.environ["REMESHER_EXTENSION_ID"]
+    user_resource = Path(bpy.utils.resource_path("USER")).resolve()
+    source_link = profile_root / "extensions" / "user_default" / extension_id
+    manifest = tomllib.loads((repo_root / "blender_manifest.toml").read_text(encoding="utf-8"))
+    bl_info_version = read_bl_info_version(repo_root / "__init__.py")
+
+    assert_true(user_resource == profile_root, "Blender USER 프로필이 개발 프로필과 다릅니다.")
+    assert_true(source_link.resolve() == repo_root, "개발 Extension 심링크가 저장소를 가리키지 않습니다.")
+    assert_true(manifest["version"] == bl_info_version, "manifest와 bl_info 버전이 다릅니다.")
+
+    mesh = bpy.data.meshes.new("SmokeMesh")
+    mesh.from_pydata(
+        [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)],
+        [],
+        [(0, 1, 2, 3)],
+    )
+    mesh.update()
+    obj = bpy.data.objects.new("SmokeObject", mesh)
+    obj.location = (10, 0, 0)
+    bpy.context.collection.objects.link(obj)
+    bpy.context.view_layer.objects.active = obj
+    obj.select_set(True)
+    bpy.context.view_layer.update()
+
+    props = bpy.context.scene.zzamjak_3d_remesher
+    props.target_quad_count = 12
+    props.symmetry_x = True
+    props.symmetry_y = False
+    props.symmetry_z = False
+
+    result = bpy.ops.object.zzamjak_3d_remesher_prepare_density()
+    assert_true(result == {"FINISHED"}, "밀도 속성 준비 실패")
+    density_attribute = mesh.color_attributes.get(props.density_attribute_name)
+    assert_true(density_attribute is not None, "밀도 속성이 없습니다.")
+    density_attribute.data[0].color = (0.25, 0.25, 0.25, 1.0)
+
+    result = bpy.ops.object.zzamjak_3d_remesher_prepare_density()
+    assert_true(result == {"FINISHED"}, "기존 밀도 속성 재사용 실패")
+    assert_true(abs(density_attribute.data[0].color[0] - 0.25) < 1.0e-6, "기존 밀도 값을 덮어썼습니다.")
+
+    props.density_attribute_name = " "
+    assert_cancelled(bpy.ops.object.zzamjak_3d_remesher_prepare_density, "밀도 속성 이름")
+    props.density_attribute_name = "remesh_density"
+
+    conflict_mesh = bpy.data.meshes.new("ConflictMesh")
+    conflict_mesh.from_pydata([(0, 0, 0), (1, 0, 0), (0, 1, 0)], [], [(0, 1, 2)])
+    conflict_mesh.update()
+    conflict_mesh.attributes.new(name="density_conflict", type="FLOAT", domain="POINT")
+    conflict_obj = bpy.data.objects.new("ConflictObject", conflict_mesh)
+    bpy.context.collection.objects.link(conflict_obj)
+    bpy.context.view_layer.objects.active = conflict_obj
+    obj.select_set(False)
+    conflict_obj.select_set(True)
+    props.density_attribute_name = "density_conflict"
+    assert_cancelled(bpy.ops.object.zzamjak_3d_remesher_prepare_density, "다른 속성")
+    assert_true(conflict_mesh.color_attributes.get("density_conflict") is None, "충돌 속성 위에 컬러 속성을 만들면 안 됩니다.")
+
+    conflict_obj.select_set(False)
+    obj.select_set(True)
+    bpy.context.view_layer.objects.active = obj
+    props.density_attribute_name = "remesh_density"
+
+    guide_curve = bpy.data.curves.new("REMESH_GUIDE_smoke", "CURVE")
+    guide_curve.dimensions = "3D"
+    guide_spline = guide_curve.splines.new("POLY")
+    guide_spline.points.add(1)
+    guide_spline.points[0].co = (11, 0, 0, 1)
+    guide_spline.points[1].co = (12, 0, 0, 1)
+    guide_obj = bpy.data.objects.new("REMESH_GUIDE_smoke", guide_curve)
+    bpy.context.collection.objects.link(guide_obj)
+    guides = adapter.collect_guide_curves(bpy.context.scene, obj)
+    assert_true(guides and guides[0].splines[0] == ((1.0, 0.0, 0.0), (2.0, 0.0, 0.0)), "가이드 좌표가 선택 메시 로컬 좌표로 변환되지 않았습니다.")
+
+    bpy.ops.object.mode_set(mode="EDIT")
+    assert_cancelled(bpy.ops.object.zzamjak_3d_remesher_analyze, "오브젝트 모드")
+    bpy.ops.object.mode_set(mode="OBJECT")
+
+    result = bpy.ops.object.zzamjak_3d_remesher_analyze()
+    assert_true(result == {"FINISHED"}, "메시 분석 실패")
+    assert_true("쿼드 1" in props.last_report, "분석 결과가 예상과 다릅니다.")
+
+    original_vertices = tuple(tuple(vertex.co) for vertex in mesh.vertices)
+    original_faces = tuple(tuple(polygon.vertices) for polygon in mesh.polygons)
+    result = bpy.ops.object.zzamjak_3d_remesher_run()
+    assert_true(result == {"CANCELLED"}, "미구현 엔진은 성공으로 보고되면 안 됩니다.")
+    assert_true("아직 구현" in props.last_report, "미구현 상태 메시지가 없습니다.")
+    assert_true(tuple(tuple(vertex.co) for vertex in mesh.vertices) == original_vertices, "미구현 실행이 원본 정점을 바꾸면 안 됩니다.")
+    assert_true(tuple(tuple(polygon.vertices) for polygon in mesh.polygons) == original_faces, "미구현 실행이 원본 면을 바꾸면 안 됩니다.")
+
+    module.unregister()
+    assert_true(not hasattr(bpy.types.Scene, "zzamjak_3d_remesher"), "unregister 후 Scene 속성이 남아 있습니다.")
+    module.register()
+    assert_true(hasattr(bpy.types.Scene, "zzamjak_3d_remesher"), "register 후 Scene 속성이 없습니다.")
+    print("Blender smoke test passed")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:
+        print(f"Blender smoke test failed: {exc}", file=sys.stderr)
+        raise

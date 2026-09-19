@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      BLENDER_VERSION: 5.2.0
+      BLENDER_ARCHIVE: blender-5.2.0-linux-x64.tar.xz
+      BLENDER_URL: https://download.blender.org/release/Blender5.2/blender-5.2.0-linux-x64.tar.xz
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Python unittest 실행
+        run: python -m unittest discover -s tests -p "test_*.py"
+
+      - name: Blender LTS 다운로드
+        run: |
+          curl -fL "$BLENDER_URL" -o "$RUNNER_TEMP/$BLENDER_ARCHIVE"
+          mkdir -p "$RUNNER_TEMP/blender"
+          tar -xf "$RUNNER_TEMP/$BLENDER_ARCHIVE" -C "$RUNNER_TEMP/blender" --strip-components=1
+          echo "BLENDER_BINARY=$RUNNER_TEMP/blender/blender" >> "$GITHUB_ENV"
+
+      - name: Extension 빌드 및 공식 검증
+        run: python scripts/build_extension.py --blender-binary "$BLENDER_BINARY"
+
+      - name: 헤드리스 Blender smoke 실행
+        run: |
+          profile="$RUNNER_TEMP/3DRemesherDev/5.2"
+          repo_dir="$profile/extensions/user_default"
+          mkdir -p "$repo_dir" "$profile/config" "$profile/scripts" "$profile/datafiles"
+          ln -s "$GITHUB_WORKSPACE" "$repo_dir/zzamjak_3d_remesher"
+          BLENDER_USER_RESOURCES="$profile" \
+          BLENDER_USER_CONFIG="$profile/config" \
+          BLENDER_USER_SCRIPTS="$profile/scripts" \
+          BLENDER_USER_DATAFILES="$profile/datafiles" \
+          BLENDER_USER_EXTENSIONS="$profile/extensions" \
+          REMESHER_DEV_ROOT="$GITHUB_WORKSPACE" \
+          REMESHER_DEV_PROFILE="$profile" \
+          REMESHER_EXTENSION_ID="zzamjak_3d_remesher" \
+          "$BLENDER_BINARY" --background --python-exit-code 1 --python scripts/dev_bootstrap.py --python tests/blender_smoke.py
