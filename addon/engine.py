@@ -219,7 +219,9 @@ def _try_structured_remesh(
     from .topology.planar import try_remesh_planar
     from .topology.periodic import try_remesh_periodic
     from .topology.triangulated_limb import try_remesh_triangulated_limb
+    from .topology.irregular_tube import try_remesh_irregular_tube
     from .topology.branch_t import try_remesh_branch_t
+    from .topology.rounded_branch import try_remesh_rounded_branch
     from .topology.face_patch import try_remesh_face_patch
     from .topology.guided_surface import try_remesh_guided_surface
     from .topology.components import try_remesh_components
@@ -230,7 +232,9 @@ def _try_structured_remesh(
         ("평면 격자", try_remesh_planar),
         ("주기 격자", try_remesh_periodic),
         ("삼각 튜브 격자", try_remesh_triangulated_limb),
+        ("불규칙 삼각 튜브 격자", try_remesh_irregular_tube),
         ("연결된 사각 T 격자", try_remesh_branch_t),
+        ("둥근 T 분기 격자", try_remesh_rounded_branch),
         ("가이드 얼굴 패치", try_remesh_face_patch),
         ("가이드 곡면 격자", try_remesh_guided_surface),
         ("분리 표면 격자", try_remesh_components),

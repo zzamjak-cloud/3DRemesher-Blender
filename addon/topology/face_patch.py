@@ -62,11 +62,12 @@ def try_remesh_face_patch(engine_input: EngineInput, *, cancelled: CancelledCall
         candidate = _make_patches(guides, origin, grid_candidate, surface)
         if candidate is None:
             continue
-        predicted = 6 * grid_candidate * grid_candidate + 2 * sum(2 * (p.x1 - p.x0 + p.y1 - p.y0) for p in candidate)
-        choices.append((abs(predicted - target), grid_candidate, candidate))
+        annulus_layers = 3 if any(_patch_stretch(patch) > 1.65 for patch in candidate) else 2
+        predicted = 6 * grid_candidate * grid_candidate + annulus_layers * sum(2 * (p.x1 - p.x0 + p.y1 - p.y0) for p in candidate)
+        choices.append((abs(predicted - target), grid_candidate, candidate, annulus_layers))
     if not choices:
         return None
-    _, grid, patches = min(choices, key=lambda item: item[0])
+    _, grid, patches, annulus_layers = min(choices, key=lambda item: item[0])
     grid_adjustments = _shared_boundary_adjustments(patches, grid)
 
     vertices: list[Vector3] = []
@@ -118,7 +119,7 @@ def try_remesh_face_patch(engine_input: EngineInput, *, cancelled: CancelledCall
             return None
         grid_face = grids[patch.face]
         boundary = _rectangle_boundary(grid_face, patch)
-        guide_uv = _resample_guide_uv(patch.uv, nx, ny)
+        guide_uv = _resample_guide_uv(patch.uv, nx, ny, normalize_corners=annulus_layers == 3)
         if guide_uv is None or len(guide_uv) != len(boundary):
             return None
         loop: list[int] = []
@@ -127,27 +128,31 @@ def try_remesh_face_patch(engine_input: EngineInput, *, cancelled: CancelledCall
             if index is None:
                 return None
             loop.append(index)
-        middle: list[int] = []
+        inner_rings: list[list[int]] = [[] for _ in range(annulus_layers - 1)]
         for k, (u, v) in enumerate(guide_uv):
             boundary_point = vertices[boundary[k]]
             boundary_uv = _project_uv(sub(boundary_point, origin), patch.face)
             if boundary_uv is None:
                 return None
             separation = _distance(boundary_uv, (u, v))
-            fraction = max(0.5, min(0.7, 0.5 + 2 * (separation - 0.05)))
-            midpoint = _direction(
-                patch.face,
-                boundary_uv[0] * (1 - fraction) + u * fraction,
-                boundary_uv[1] * (1 - fraction) + v * fraction,
-            )
-            index = add_direction(midpoint)
-            if index is None:
-                return None
-            middle.append(index)
-        for k in range(len(loop)):
-            next_k = (k + 1) % len(loop)
-            faces.append((boundary[k], boundary[next_k], middle[next_k], middle[k]))
-            faces.append((middle[k], middle[next_k], loop[next_k], loop[k]))
+            for layer in range(annulus_layers - 1):
+                fraction = (
+                    max(0.5, min(0.7, 0.5 + 2 * (separation - 0.05)))
+                    if annulus_layers == 2 else (layer + 1) / annulus_layers
+                )
+                midpoint = _direction(
+                    patch.face,
+                    boundary_uv[0] * (1 - fraction) + u * fraction,
+                    boundary_uv[1] * (1 - fraction) + v * fraction,
+                )
+                index = add_direction(midpoint)
+                if index is None:
+                    return None
+                inner_rings[layer].append(index)
+        for outer_ring, inner_ring in zip((boundary, *inner_rings), (*inner_rings, loop)):
+            for k in range(len(loop)):
+                next_k = (k + 1) % len(loop)
+                faces.append((outer_ring[k], outer_ring[next_k], inner_ring[next_k], inner_ring[k]))
 
         cap: list[list[int]] = [[-1] * (nx + 1) for _ in range(ny + 1)]
         for k in range(nx):
@@ -267,6 +272,12 @@ def _patches_overlap(first: _Patch, second: _Patch) -> bool:
     )
 
 
+def _patch_stretch(patch: _Patch) -> float:
+    width = max(point[0] for point in patch.uv) - min(point[0] for point in patch.uv)
+    height = max(point[1] for point in patch.uv) - min(point[1] for point in patch.uv)
+    return max(width, height) / max(min(width, height), _EPS)
+
+
 def _shared_boundary_adjustments(patches: Sequence[_Patch], grid: int) -> dict[tuple[int, int, int], tuple[float, float]]:
     adjusted: dict[tuple[int, int, int], tuple[float, float]] = {}
 
@@ -306,12 +317,19 @@ def _rectangle_boundary(grid: Sequence[Sequence[int]], patch: _Patch) -> tuple[i
     )
 
 
-def _resample_guide_uv(points: Sequence[tuple[float, float]], nx: int, ny: int) -> tuple[tuple[float, float], ...] | None:
+def _resample_guide_uv(points: Sequence[tuple[float, float]], nx: int, ny: int, *, normalize_corners: bool = False) -> tuple[tuple[float, float], ...] | None:
+    center_u = sum(point[0] for point in points) / len(points)
+    center_v = sum(point[1] for point in points) / len(points)
+    radius_u = max(abs(point[0] - center_u) for point in points)
+    radius_v = max(abs(point[1] - center_v) for point in points)
+    if min(radius_u, radius_v) <= _EPS:
+        return None
+    normalized = tuple(((point[0] - center_u) / radius_u, (point[1] - center_v) / radius_v) for point in points) if normalize_corners else points
     corners = (
-        min(range(len(points)), key=lambda i: points[i][0] + points[i][1]),
-        max(range(len(points)), key=lambda i: points[i][0] - points[i][1]),
-        max(range(len(points)), key=lambda i: points[i][0] + points[i][1]),
-        min(range(len(points)), key=lambda i: points[i][0] - points[i][1]),
+        min(range(len(points)), key=lambda i: normalized[i][0] + normalized[i][1]),
+        max(range(len(points)), key=lambda i: normalized[i][0] - normalized[i][1]),
+        max(range(len(points)), key=lambda i: normalized[i][0] + normalized[i][1]),
+        min(range(len(points)), key=lambda i: normalized[i][0] - normalized[i][1]),
     )
     if len(set(corners)) != 4 or not (0 < (corners[1] - corners[0]) % len(points) < (corners[2] - corners[0]) % len(points) < (corners[3] - corners[0]) % len(points)):
         return None

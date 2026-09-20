@@ -18,17 +18,21 @@ from ..core import (
 from ..surface import SurfaceIndex
 from .face_patch import try_remesh_face_patch
 from .branch_t import try_remesh_branch_t
+from .rounded_branch import try_remesh_rounded_branch
 from .guided_surface import try_remesh_guided_surface
 from .periodic import try_remesh_periodic
 from .planar import try_remesh_planar
 from .triangulated_limb import try_remesh_triangulated_limb
+from .irregular_tube import try_remesh_irregular_tube
 
 
 _BUILDERS = (
     try_remesh_planar,
     try_remesh_periodic,
     try_remesh_triangulated_limb,
+    try_remesh_irregular_tube,
     try_remesh_branch_t,
+    try_remesh_rounded_branch,
     try_remesh_face_patch,
     try_remesh_guided_surface,
 )
