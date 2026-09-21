@@ -17,6 +17,7 @@ from .core import (
     Vector3,
     analyze_mesh,
     build_engine_input,
+    _is_degenerate_face,
 )
 from .engine import (
     MAX_ACCEPTED_ASPECT_RATIO,
@@ -86,6 +87,23 @@ def remesh_large(
             raise ValueError(quadriflow_warning or "QuadriFlow 경로가 결과를 만들지 못했습니다.")
 
     _require_blender()
+    try:
+        return _remesh_with_proxy(engine_input, structured_warning, quadriflow_warning, progress=progress, cancelled=cancelled)
+    except ValueError as exc:
+        if quadriflow_warning:
+            raise ValueError(f"{exc} (앞선 QuadriFlow 경로: {quadriflow_warning})") from exc
+        raise
+
+
+def _remesh_with_proxy(
+    engine_input: EngineInput,
+    structured_warning: str,
+    quadriflow_warning: str,
+    *,
+    progress: ProgressCallback | None,
+    cancelled: CancelledCallback | None,
+) -> RemeshResult:
+    """격자·QuadriFlow 경로가 모두 실패한 큰 입력을 임시 Decimate 프록시와 자체 엔진으로 처리한다."""
     _report(progress, 0.01, "큰 메시 전처리 준비")
     source = engine_input.mesh
     source.validate()
@@ -214,7 +232,8 @@ def _clean_for_proxy(mesh: MeshData) -> tuple[MeshData, tuple[str, ...]]:
     removed_degenerate_faces = 0
 
     for face in mesh.faces:
-        if len(set(face)) != len(face):
+        # 정점이 겹치거나 면적이 없는 면은 프록시 검증을 통과하지 못하므로 미리 뺀다 (실측: 갱스터 10만면에 23개)
+        if len(set(face)) != len(face) or _is_degenerate_face(vertices, face):
             removed_degenerate_faces += 1
             continue
         key = tuple(sorted(face))

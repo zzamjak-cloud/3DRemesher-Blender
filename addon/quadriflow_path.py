@@ -64,6 +64,8 @@ QF_TOTAL_BUDGET = 240.0          # 사다리 전체에 허용하는 시간(초).
 SHRINK_LIMIT = 3.0               # 노멀 투영 한계 = 복셀 한 변 x 이 배수
 RELAX_ROUNDS = 2
 RELAX_FACTOR = 0.5
+SLIVER_ASPECT = 8.0              # 이 종횡비를 넘는 면의 정점만 골라 다시 편다 — 실측(갱스터 6,000쿼드): 22.2 → 7.6
+SLIVER_ROUNDS = 20               # 슬리버 완화 반복 상한. 남는 몇 개는 형상이 실제로 접힌 곳이다
 
 _WORKER = Path(__file__).with_name("quadriflow_worker.py")
 _TEMP_ROOT: Path | None = None
@@ -245,9 +247,10 @@ def remesh_quadriflow(
         target_error = abs(analysis.quad_count - target) / max(1, target)
         if analysis.quad_count != target:
             warnings.append(f"QuadriFlow 배치로 목표와 실제 개수가 다릅니다: target={target}, actual={analysis.quad_count} ({target_error:.1%})")
-        if analysis.boundary_edge_count and not engine_input.analysis.boundary_edge_count:
-            raise ValueError(f"QuadriFlow 결과에 원본에 없던 열린 경계 {analysis.boundary_edge_count}개가 남았습니다.")
-        if engine_input.analysis.boundary_edge_count and not analysis.boundary_edge_count:
+        if analysis.boundary_edge_count:
+            # 복셀 리메시가 표면을 닫으므로 남은 경계는 메우지 못한 구멍이거나 미러 용접 실패다
+            raise ValueError(f"QuadriFlow 결과에 메우지 못한 열린 경계 {analysis.boundary_edge_count}개가 남았습니다.")
+        if engine_input.analysis.boundary_edge_count:
             warnings.append("복셀 리메시가 열린 경계를 닫아 결과는 닫힌 표면입니다.")
         warnings.insert(0, f"QuadriFlow 경로: 복셀 리메시 뒤 새 와이어를 깔고 원본 표면에 투영했습니다 ({time.monotonic() - started:.1f}초).")
 
@@ -769,52 +772,70 @@ def _ordered_loop_vertices(loop) -> list | None:
 def _repair_output(obj, plane_axes: tuple[str, ...], scale: float) -> None:
     """QuadriFlow 가 남긴 작은 구멍을 쿼드로 메우고 대칭면 정점을 평면에 맞춘다. 대칭면 루프는 열어 둔다.
 
-    짝수 구멍은 중심 정점을 세워 쿼드 부채로, 홀수 구멍은 N각형을 삼각화한 뒤 다시 합친다.
-    중심 정점 위치는 뒤따르는 슈링크랩이 원본 표면으로 끌어온다."""
+    QuadriFlow 출력은 구멍 가장자리에 겹친 정점(크랙)을 남기기도 해서(실측 2026-09-21, 갱스터: 3엣지 구멍 4개,
+    겹친 정점 4개) 먼저 경계 정점을 용접한다. 짝수 구멍은 중심 정점을 세워 쿼드 부채로, 그 외는 면을 바로 만들어
+    삼각화한 뒤 다시 합친다. 한 번에 안 닫히는 구멍이 있어 여러 번 돈다. 중심 정점 위치는 뒤따르는 슈링크랩이
+    원본 표면으로 끌어온다."""
     import bmesh
 
     bm = bmesh.new()
     bm.from_mesh(obj.data)
-    leftovers = []
+    border_vertices = list({vertex for edge in bm.edges if len(edge.link_faces) == 1 for vertex in edge.verts})
+    if border_vertices:
+        bmesh.ops.remove_doubles(bm, verts=border_vertices, dist=SNAP_TOLERANCE_RATIO * scale)
     plane_vertices: dict = {}
-    for loop in _boundary_loops(bm):
-        if _loop_on_plane(loop, plane_axes, scale):
-            tolerance = _plane_snap_tolerance(loop, scale)
-            for edge in loop:
-                for vertex in edge.verts:
-                    plane_vertices[vertex] = max(tolerance, plane_vertices.get(vertex, 0.0))
-            continue
-        ordered = _ordered_loop_vertices(loop)
-        if ordered is None or len(ordered) < 4 or len(ordered) % 2 or len(ordered) > HOLE_MAX_EDGES:
-            leftovers.extend(loop)
-            continue
-        try:
-            if len(ordered) == 4:
-                bm.faces.new(ordered)
+    for _ in range(REPAIR_ROUNDS):
+        leftovers = []
+        open_holes = False
+        for loop in _boundary_loops(bm):
+            if _loop_on_plane(loop, plane_axes, scale):
+                tolerance = _plane_snap_tolerance(loop, scale)
+                for edge in loop:
+                    for vertex in edge.verts:
+                        plane_vertices[vertex] = max(tolerance, plane_vertices.get(vertex, 0.0))
                 continue
-            centre = bm.verts.new(sum((v.co for v in ordered), ordered[0].co * 0.0) / len(ordered))
-            count = len(ordered)
-            for index in range(0, count, 2):
-                bm.faces.new((centre, ordered[index], ordered[(index + 1) % count], ordered[(index + 2) % count]))
-        except ValueError:
-            leftovers.extend(loop)  # 이미 있는 면과 겹치는 루프 — 일반 구멍 메우기에 맡긴다
-    if leftovers:
-        bmesh.ops.holes_fill(bm, edges=sorted(set(leftovers), key=lambda edge: edge.index), sides=0)
-        odd = [face for face in bm.faces if len(face.verts) != 4]
-        if odd:
-            result = bmesh.ops.triangulate(bm, faces=odd)
-            triangles = [face for face in result["faces"] if face.is_valid and len(face.verts) == 3]
-            if triangles:
-                bmesh.ops.join_triangles(
-                    bm, faces=triangles, cmp_seam=False, cmp_sharp=False, cmp_uvs=False,
-                    cmp_vcols=False, cmp_materials=False, angle_face_threshold=math.radians(40.0),
-                    angle_shape_threshold=math.radians(40.0),
-                )
-    _snap_plane_vertices(plane_vertices, plane_axes)
+            open_holes = True
+            ordered = _ordered_loop_vertices(loop)
+            if ordered is not None and 3 <= len(ordered) <= HOLE_MAX_EDGES and _fill_loop(bm, ordered):
+                continue
+            leftovers.extend(loop)
+        if not open_holes:
+            break
+        if leftovers:
+            bmesh.ops.holes_fill(bm, edges=sorted(set(leftovers), key=lambda edge: edge.index), sides=0)
+    odd = [face for face in bm.faces if len(face.verts) != 4]
+    if odd:
+        result = bmesh.ops.triangulate(bm, faces=odd)
+        triangles = [face for face in result["faces"] if face.is_valid and len(face.verts) == 3]
+        if triangles:
+            bmesh.ops.join_triangles(
+                bm, faces=triangles, cmp_seam=False, cmp_sharp=False, cmp_uvs=False,
+                cmp_vcols=False, cmp_materials=False, angle_face_threshold=math.radians(40.0),
+                angle_shape_threshold=math.radians(40.0),
+            )
+    _snap_plane_vertices({vertex: tolerance for vertex, tolerance in plane_vertices.items() if vertex.is_valid}, plane_axes)
     bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
     bm.to_mesh(obj.data)
     bm.free()
     obj.data.update()
+
+
+def _fill_loop(bm, ordered) -> bool:
+    """단순 폐루프 하나를 면으로 닫는다. 짝수 6각 이상은 중심 정점 쿼드 부채, 나머지는 면 하나(뒤에서 삼각화·병합)."""
+    count = len(ordered)
+    try:
+        if count >= 6 and count % 2 == 0:
+            centre_co = ordered[0].co.copy()
+            for vertex in ordered[1:]:
+                centre_co += vertex.co
+            centre = bm.verts.new(centre_co / count)
+            for index in range(0, count, 2):
+                bm.faces.new((centre, ordered[index], ordered[(index + 1) % count], ordered[(index + 2) % count]))
+        else:
+            bm.faces.new(ordered)
+    except ValueError:
+        return False  # 이미 있는 면과 겹치는 루프 — 일반 구멍 메우기에 맡긴다
+    return True
 
 
 def _snap_plane_vertices(plane_vertices: dict, plane_axes: tuple[str, ...]) -> None:
@@ -869,6 +890,8 @@ def _shrinkwrap(obj, target_obj, limit: float, plane_axes: tuple[str, ...], scal
 
     최근접점만 쓰면 접히는 공간에서 이웃 정점이 서로 다른 표면으로 끌려가 면이 교차하므로 노멀 방향 양방향
     투영을 먼저 하고, 빗나간 정점만 최근접점으로 붙인다. 그 뒤 스무딩과 재투영을 반복해 접힌 와이어를 편다.
+    마지막으로 종횡비가 큰 슬리버 면 주변만 골라 다시 편다 — QuadriFlow 는 구멍 주변에 2mm 남짓한 엣지를 남기고
+    이것이 종횡비 20 게이트에 걸린다(실측 2026-09-21, 갱스터 10만면: 22.2 → 7.6).
     대칭면 위 정점은 매 단계 뒤 평면으로 되돌려 미러 용접이 어긋나지 않게 한다."""
     import bmesh
     import bpy
@@ -929,11 +952,33 @@ def _shrinkwrap(obj, target_obj, limit: float, plane_axes: tuple[str, ...], scal
         obj.data.update()
         pin()
 
+    def relax_slivers() -> None:
+        for _ in range(SLIVER_ROUNDS):
+            _check_cancelled(cancelled)
+            bm = bmesh.new()
+            bm.from_mesh(obj.data)
+            slivers = [face for face in bm.faces if _face_aspect(face) > SLIVER_ASPECT]
+            if not slivers:
+                bm.free()
+                return
+            # 슬리버 정점과 그 이웃 한 겹을 함께 펴야 짧은 엣지가 실제로 늘어난다
+            ring = list({neighbour for face in slivers for vertex in face.verts for edge in vertex.link_edges for neighbour in edge.verts})
+            bmesh.ops.smooth_vert(bm, verts=ring, factor=RELAX_FACTOR, use_axis_x=True, use_axis_y=True, use_axis_z=True)
+            for vertex in ring:
+                nearest = tree.find_nearest(vertex.co)
+                if nearest[0] is not None:
+                    vertex.co = nearest[0]
+            bm.to_mesh(obj.data)
+            bm.free()
+            obj.data.update()
+            pin()
+
     project()
     for _ in range(RELAX_ROUNDS):
         _check_cancelled(cancelled)
         relax()
         project()
+    relax_slivers()
 
 
 # --- 품질 측정 ---------------------------------------------------------------
@@ -1004,6 +1049,11 @@ def _symmetry_error(vertices, axes: tuple[str, ...]) -> float:
             _, _, distance = tree.find(Vector(mirrored))
             maximum = max(maximum, distance)
     return maximum
+
+
+def _face_aspect(face) -> float:
+    lengths = [edge.calc_length() for edge in face.edges]
+    return max(lengths) / max(min(lengths), 1.0e-12)
 
 
 def _quad_aspect_stats(vertices, faces) -> tuple[float, float]:

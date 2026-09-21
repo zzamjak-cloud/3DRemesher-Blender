@@ -1,7 +1,7 @@
 bl_info = {
     "name": "3D Remesher",
     "author": "zzamjak-cloud",
-    "version": (0, 4, 1),
+    "version": (0, 4, 2),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > 3D Remesher",
     "description": "대칭과 밀도를 제어하는 적응형 쿼드 리토폴로지",
