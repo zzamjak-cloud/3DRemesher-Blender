@@ -95,8 +95,12 @@ operators._request_job_cancel(cancel_job, terminate=True)
 operators._cleanup_job_files(cancel_job)
 assert cancel_job.process.poll() is not None
 assert not cancel_job.temp_dir.exists()
-time.sleep(1.0)
-survivors = subprocess.run(["pgrep", "-f", "quadriflow_worker.py"], capture_output=True, text=True).stdout.split()
+deadline = time.monotonic() + 15.0
+while True:
+    survivors = subprocess.run(["pgrep", "-f", "quadriflow_worker.py"], capture_output=True, text=True).stdout.split()
+    if not survivors or time.monotonic() > deadline:
+        break
+    time.sleep(0.2)  # 종료 신호를 받은 Blender 가 내려가는 데 시간이 걸릴 수 있다
 assert not survivors, f"취소 뒤 QuadriFlow 자식 프로세스가 남았습니다: {survivors}"
 assert before_cancel == operators._source_input_fingerprint(source, bpy.context.scene)
 print("취소: worker·자식 프로세스 종료, 작업 폴더 삭제 확인")

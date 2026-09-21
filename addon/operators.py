@@ -523,18 +523,25 @@ def _request_job_cancel(job: _RunJob, *, terminate: bool = False) -> None:
 
 
 def _signal_job_group(job: _RunJob, *, kill: bool) -> None:
-    """worker 와 그 자식(QuadriFlow Blender)을 프로세스 그룹째 종료한다. 그룹 종료가 불가능하면 worker 만 종료한다."""
+    """worker 와 그 자식(QuadriFlow Blender)을 프로세스 그룹째 종료한다.
+
+    worker 는 새 세션으로 띄워 그룹 ID 가 worker PID 와 같으므로, worker 가 먼저 죽은 뒤에도 남은 자식을
+    같은 그룹 ID 로 정리할 수 있다. 그룹 종료가 불가능하면 worker 만 종료한다."""
     process = job.process
-    if process is None or process.poll() is not None:
+    if process is None:
         return
     if os.name != "nt":
         import signal
 
         try:
-            os.killpg(os.getpgid(process.pid), signal.SIGKILL if kill else signal.SIGTERM)
+            os.killpg(process.pid, signal.SIGKILL if kill else signal.SIGTERM)
             return
-        except (ProcessLookupError, PermissionError, OSError):
+        except ProcessLookupError:
+            return  # 그룹에 남은 프로세스가 없다
+        except (PermissionError, OSError):
             pass
+    if process.poll() is not None:
+        return
     if kill:
         process.kill()
     else:
@@ -565,13 +572,16 @@ def _read_job_result(job: _RunJob) -> dict:
 
 
 def _cleanup_job_files(job: _RunJob) -> None:
-    if job.process is not None and job.process.poll() is None:
-        _signal_job_group(job, kill=False)
-        try:
-            job.process.wait(timeout=1.0)
-        except subprocess.TimeoutExpired:
-            _signal_job_group(job, kill=True)
-            job.process.wait(timeout=1.0)
+    if job.process is not None:
+        if job.process.poll() is None:
+            _signal_job_group(job, kill=False)
+            try:
+                job.process.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                _signal_job_group(job, kill=True)
+                job.process.wait(timeout=1.0)
+        # worker 가 자식 정리를 끝내지 못하고 죽었어도 그룹에 남은 QuadriFlow 프로세스를 거둔다
+        _signal_job_group(job, kill=True)
     shutil.rmtree(job.temp_dir, ignore_errors=True)
 
 
