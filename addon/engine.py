@@ -72,9 +72,9 @@ def remesh(
         for guide in engine_input.guide_curves
         if any(kind in {"LOOP", "STRIP"} for kind in guide.kind)
     )
-    if required_guides and settings.topology_mode == "LEGACY":
-        raise ValueError("실험 엔진은 필수 LOOP/STRIP 가이드를 보존하지 못합니다. 격자 경로를 선택해 주세요.")
-    if settings.topology_mode != "LEGACY":
+    if required_guides and settings.topology_mode in {"LEGACY", "QUADRIFLOW"}:
+        raise ValueError("실험 엔진과 QuadriFlow 경로는 필수 LOOP/STRIP 가이드를 보존하지 못합니다. 격자 경로를 선택해 주세요.")
+    if settings.topology_mode in {"AUTO", "STRUCTURED"}:
         structured = _try_structured_remesh(engine_input, progress=progress, cancelled=cancelled)
         if structured is not None:
             return structured
@@ -82,6 +82,13 @@ def remesh(
             raise ValueError(f"필수 가이드의 연속 엣지 경로를 만들지 못했습니다: {', '.join(required_guides)}. 현재 입력 형상에서 필수 루프와 쿼드 띠를 배치할 수 없습니다.")
         if settings.topology_mode == "STRUCTURED":
             raise ValueError("이 형상과 가이드에는 연속 격자 배치를 만들 수 없습니다. 격자 경계를 지정하거나 실험 엔진을 선택해 주세요.")
+    quadriflow_warning = ""
+    if settings.topology_mode in {"AUTO", "QUADRIFLOW"}:
+        general, quadriflow_warning = try_quadriflow_remesh(engine_input, progress=progress, cancelled=cancelled)
+        if general is not None:
+            return general
+        if settings.topology_mode == "QUADRIFLOW":
+            raise ValueError(quadriflow_warning or "QuadriFlow 경로가 결과를 만들지 못했습니다.")
     source = engine_input.mesh
     scale = max(max(v[a] for v in source.vertices)-min(v[a] for v in source.vertices) for a in range(3))
     if scale <= 0:
@@ -105,6 +112,8 @@ def remesh(
     warnings = []
     if settings.topology_mode == "AUTO":
         warnings.append("연속 격자 배치를 만들지 못해 실험 엔진을 사용했습니다. 엣지 루프 흐름을 확인하세요.")
+        if quadriflow_warning:
+            warnings.append(quadriflow_warning)
     if capped_target != settings.target_quad_count:
         warnings.append(f"출력 상한 {MAX_OUTPUT_QUADS}쿼드에 맞춰 목표를 제한했습니다.")
     if axes:
@@ -205,6 +214,45 @@ def remesh(
         analysis.boundary_edge_count,analysis.non_manifold_edge_count,analysis.degenerate_face_count,
         max_aspect,mean_aspect,error,max(distances,default=0.),sum(distances)/max(1,len(distances)),
         symmetry_error,field_score),tuple(dict.fromkeys(warnings)),())
+
+
+def try_quadriflow_remesh(
+    engine_input: EngineInput,
+    *,
+    progress: ProgressCallback | None,
+    cancelled: CancelledCallback | None,
+) -> tuple[RemeshResult | None, str]:
+    """복셀 리메시·QuadriFlow 범용 경로를 시도한다. (결과 또는 None, 건너뛴 사유) 를 돌려준다.
+
+    AUTO 에서는 bpy 가 없거나, 밀도·DIRECTION 가이드처럼 이 경로가 반영하지 못하는 제어가 있거나,
+    경로가 실패하면 사유만 남기고 다음 경로(실험 엔진)로 넘긴다.
+    QUADRIFLOW 모드에서는 실패를 그대로 올려 결과 적용을 중단한다."""
+    from .quadriflow_path import is_available, remesh_quadriflow, unsupported_controls, unsupported_reason
+
+    mode = engine_input.settings.topology_mode
+    if mode == "AUTO":
+        controls = unsupported_controls(engine_input)
+        if controls:
+            return None, f"QuadriFlow 경로는 {', '.join(controls)}을(를) 반영하지 못해 실험 엔진을 사용합니다."
+    if not is_available():
+        message = "QuadriFlow 경로는 Blender Python 환경(worker)에서만 실행할 수 있습니다."
+        if mode == "QUADRIFLOW":
+            raise RuntimeError(message)
+        return None, message
+    reason = unsupported_reason(engine_input)
+    if reason:
+        if mode == "QUADRIFLOW":
+            raise ValueError(reason)
+        return None, reason
+    _report(progress, 0.10, "QuadriFlow 경로 시도")
+    try:
+        return remesh_quadriflow(engine_input, progress=progress, cancelled=cancelled), ""
+    except RemeshCancelled:
+        raise
+    except ValueError as exc:
+        if mode == "QUADRIFLOW":
+            raise
+        return None, f"QuadriFlow 경로를 건너뛰었습니다: {exc}"
 
 
 def _try_structured_remesh(

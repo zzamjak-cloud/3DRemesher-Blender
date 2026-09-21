@@ -49,11 +49,11 @@ def main(argv: list[str]) -> int:
             return cancel_path.exists()
 
         progress(0.0, "엔진 준비")
+        _configure_blender_temp(input_path.parent)
+        _install_terminate_handler()
         if large_input:
-            import bpy
             from addon.large_mesh import remesh_large
 
-            bpy.context.preferences.filepaths.temporary_directory = str(input_path.parent) + os.sep
             result = remesh_large(engine_input, progress=progress, cancelled=cancelled)
         else:
             result = RemeshBackend().remesh(engine_input, progress=progress, cancelled=cancelled)
@@ -70,6 +70,35 @@ def main(argv: list[str]) -> int:
             },
         )
         return 1
+
+
+def _configure_blender_temp(directory: Path) -> None:
+    """Blender 바이너리로 실행된 worker 라면 Blender 임시 파일과 QuadriFlow 중간 .blend 를 작업 폴더에 쓰게 한다.
+
+    작업 폴더는 부모가 정리하므로 취소·강제 종료 뒤에도 파일이 남지 않는다. 번들 Python 이면 아무것도 하지 않는다."""
+    try:
+        import bpy
+    except ModuleNotFoundError:
+        return
+    from addon import quadriflow_path
+
+    bpy.context.preferences.filepaths.temporary_directory = str(directory) + os.sep
+    quadriflow_path.set_temp_root(directory)
+
+
+def _install_terminate_handler() -> None:
+    """부모의 SIGTERM 을 협조적 취소로 바꿔 진행 중인 QuadriFlow 자식 프로세스까지 정리하게 한다."""
+    import signal
+
+    from addon.core import RemeshCancelled
+
+    def handler(signum, frame):
+        raise RemeshCancelled("부모 프로세스가 작업을 중단했습니다.")
+
+    try:
+        signal.signal(signal.SIGTERM, handler)
+    except (ValueError, OSError, AttributeError):
+        pass
 
 
 def _build_engine_input(payload: dict, input_dir: Path | str | None = None):

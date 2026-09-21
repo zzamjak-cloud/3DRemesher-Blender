@@ -428,9 +428,11 @@ def _start_worker_job(source_obj, scene, engine_input, warnings: tuple[str, ...]
     from .large_mesh import needs_preprocessing
 
     large_input = needs_preprocessing(engine_input.mesh)
-    executable = Path(bpy.app.binary_path) if large_input else _python_executable()
+    # QuadriFlow 경로는 bpy 가 필요하므로 해당 모드는 Blender 바이너리로 worker 를 띄운다.
+    use_blender = large_input or engine_input.settings.topology_mode in {"AUTO", "QUADRIFLOW"}
+    executable = Path(bpy.app.binary_path) if use_blender else _python_executable()
     if executable is None or not executable.is_file():
-        raise OSError("Blender 번들 Python 실행 파일을 찾을 수 없습니다.")
+        raise OSError("Blender 실행 파일을 찾을 수 없습니다." if use_blender else "Blender 번들 Python 실행 파일을 찾을 수 없습니다.")
 
     temp_dir = Path(tempfile.mkdtemp(prefix="zzamjak_3d_remesh_"))
     job = _RunJob(
@@ -456,7 +458,7 @@ def _start_worker_job(source_obj, scene, engine_input, warnings: tuple[str, ...]
             item for item in (str(repo_root), env.get("PYTHONPATH", "")) if item
         )
         arguments = [str(job.input_path), str(job.result_path), str(job.progress_path), str(job.cancel_path)]
-        if large_input:
+        if use_blender:
             profile = temp_dir / "profile"
             for kind, relative in (
                 ("RESOURCES", ""), ("CONFIG", "config"), ("SCRIPTS", "scripts"),
@@ -467,7 +469,8 @@ def _start_worker_job(source_obj, scene, engine_input, warnings: tuple[str, ...]
                 env[f"BLENDER_USER_{kind}"] = str(directory)
             command = [
                 str(executable), "--background", "--factory-startup", "--disable-autoexec", "--offline-mode",
-                "--python-exit-code", "1", "--python", str(worker_path), "--", "--large", *arguments,
+                "--python-exit-code", "1", "--python", str(worker_path), "--",
+                *(["--large"] if large_input else []), *arguments,
             ]
         else:
             command = [str(executable), str(worker_path), *arguments]
@@ -476,12 +479,15 @@ def _start_worker_job(source_obj, scene, engine_input, warnings: tuple[str, ...]
         _cleanup_job_files(job)
         raise
     try:
+        # worker 가 띄우는 QuadriFlow 손자 프로세스까지 한 번에 끝내기 위해 별도 프로세스 그룹으로 만든다.
+        group_kwargs = {"start_new_session": True} if os.name != "nt" else {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
         job.process = subprocess.Popen(
             command,
             cwd=str(repo_root),
             env=env,
             stdout=stderr_handle,
             stderr=subprocess.STDOUT,
+            **group_kwargs,
         )
     except Exception:
         stderr_handle.close()
@@ -513,7 +519,26 @@ def _request_job_cancel(job: _RunJob, *, terminate: bool = False) -> None:
     except Exception:
         pass
     if terminate and job.process is not None and job.process.poll() is None:
-        job.process.terminate()
+        _signal_job_group(job, kill=False)
+
+
+def _signal_job_group(job: _RunJob, *, kill: bool) -> None:
+    """worker 와 그 자식(QuadriFlow Blender)을 프로세스 그룹째 종료한다. 그룹 종료가 불가능하면 worker 만 종료한다."""
+    process = job.process
+    if process is None or process.poll() is not None:
+        return
+    if os.name != "nt":
+        import signal
+
+        try:
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL if kill else signal.SIGTERM)
+            return
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    if kill:
+        process.kill()
+    else:
+        process.terminate()
 
 
 def _read_job_progress(job: _RunJob) -> tuple[float, str]:
@@ -541,11 +566,11 @@ def _read_job_result(job: _RunJob) -> dict:
 
 def _cleanup_job_files(job: _RunJob) -> None:
     if job.process is not None and job.process.poll() is None:
-        job.process.terminate()
+        _signal_job_group(job, kill=False)
         try:
             job.process.wait(timeout=1.0)
         except subprocess.TimeoutExpired:
-            job.process.kill()
+            _signal_job_group(job, kill=True)
             job.process.wait(timeout=1.0)
     shutil.rmtree(job.temp_dir, ignore_errors=True)
 

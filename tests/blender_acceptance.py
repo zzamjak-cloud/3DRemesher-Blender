@@ -80,8 +80,11 @@ def _run_remesh(obj, *, target=64, symmetry=(), density=False, guide=False, expe
 
 
 def _expect_quality_rejection(obj, *, target=128):
+    """실험 엔진의 종횡비 품질 게이트가 결과 적용을 막는지 확인한다. AUTO 는 이 토러스를 QuadriFlow 로 성공시키므로 LEGACY 를 강제한다."""
     _activate(obj)
     props = bpy.context.scene.zzamjak_3d_remesher
+    previous_mode = props.topology_mode
+    props.topology_mode = "LEGACY"
     props.target_quad_count = target
     props.symmetry_x = False
     props.symmetry_y = False
@@ -91,15 +94,18 @@ def _expect_quality_rejection(obj, *, target=128):
     before = _mesh_snapshot(obj)
     names = set(bpy.context.scene.objects.keys())
     try:
-        result = bpy.ops.object.zzamjak_3d_remesher_run()
-    except RuntimeError as exc:
-        assert_true("종횡비" in str(exc), f"예상과 다른 실패입니다: {exc}")
-    else:
-        assert_true(result != {"FINISHED"}, "종횡비가 큰 토러스 결과가 적용되었습니다.")
-        assert_true("종횡비" in props.last_report, f"품질 거부 사유가 없습니다: {props.last_report}")
-    _assert_source_unchanged(obj, before)
-    assert_true(set(bpy.context.scene.objects.keys()) == names, "거부된 결과 오브젝트가 남았습니다.")
-    RESULTS.append({"name": obj.name, "input_faces": len(obj.data.polygons), "target": target, "quality_rejected": props.last_report})
+        try:
+            result = bpy.ops.object.zzamjak_3d_remesher_run()
+        except RuntimeError as exc:
+            assert_true("종횡비" in str(exc), f"예상과 다른 실패입니다: {exc}")
+        else:
+            assert_true(result != {"FINISHED"}, "종횡비가 큰 토러스 결과가 적용되었습니다.")
+            assert_true("종횡비" in props.last_report, f"품질 거부 사유가 없습니다: {props.last_report}")
+        _assert_source_unchanged(obj, before)
+        assert_true(set(bpy.context.scene.objects.keys()) == names, "거부된 결과 오브젝트가 남았습니다.")
+        RESULTS.append({"name": obj.name, "input_faces": len(obj.data.polygons), "target": target, "quality_rejected": props.last_report})
+    finally:
+        props.topology_mode = previous_mode
 
 
 def _paint_density(obj):
@@ -247,6 +253,14 @@ def main():
     _clear_scene()
     uniform_torus = _torus()
     _expect_quality_rejection(uniform_torus)
+
+    # 같은 토러스를 AUTO 로 돌리면 격자 미지원 형상이라 QuadriFlow 경로가 닫힌 쿼드 결과를 만든다.
+    _clear_scene()
+    quadriflow_torus = _torus()
+    quadriflow_result, quadriflow_report = _run_remesh(quadriflow_torus, target=128, expect_closed=True)
+    _assert_reduced(quadriflow_torus, quadriflow_result)
+    assert_true("QuadriFlow 경로" in quadriflow_report, f"AUTO 토러스가 QuadriFlow 경로를 쓰지 않았습니다: {quadriflow_report}")
+    assert_true("실험 엔진" not in quadriflow_report, f"AUTO 토러스가 실험 엔진으로 내려갔습니다: {quadriflow_report}")
 
     _clear_scene()
     density_torus = _torus()

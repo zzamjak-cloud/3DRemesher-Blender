@@ -38,6 +38,8 @@ class ZJREMESH_PT_sidebar(bpy.types.Panel):
             layout.label(text="실험 엔진: 루프 흐름 미보장", icon="INFO")
         elif props.topology_mode == "STRUCTURED":
             layout.label(text="격자 미지원 형상은 실행 중단", icon="INFO")
+        elif props.topology_mode == "QUADRIFLOW":
+            layout.label(text="복셀 리메시 후 QuadriFlow, 가이드 미보존", icon="INFO")
 
         layout.operator("object.zzamjak_3d_remesher_prepare_density", icon="GROUP_VCOL")
         layout.operator("object.zzamjak_3d_remesher_analyze", icon="VIEWZOOM")

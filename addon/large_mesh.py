@@ -18,7 +18,14 @@ from .core import (
     analyze_mesh,
     build_engine_input,
 )
-from .engine import MAX_ACCEPTED_ASPECT_RATIO, MAX_SOURCE_CORNERS, MAX_SOURCE_FACES, MAX_SOURCE_VERTICES, _try_structured_remesh
+from .engine import (
+    MAX_ACCEPTED_ASPECT_RATIO,
+    MAX_SOURCE_CORNERS,
+    MAX_SOURCE_FACES,
+    MAX_SOURCE_VERTICES,
+    _try_structured_remesh,
+    try_quadriflow_remesh,
+)
 
 
 MAX_ENGINE_TRIANGLES = 20000
@@ -53,10 +60,10 @@ def remesh_large(
         guide.name for guide in engine_input.guide_curves
         if any(kind in {"LOOP", "STRIP"} for kind in guide.kind)
     )
-    if required_guides and settings.topology_mode == "LEGACY":
-        raise ValueError("실험 엔진은 필수 LOOP/STRIP 가이드를 보존하지 못합니다. 격자 경로를 선택해 주세요.")
+    if required_guides and settings.topology_mode in {"LEGACY", "QUADRIFLOW"}:
+        raise ValueError("실험 엔진과 QuadriFlow 경로는 필수 LOOP/STRIP 가이드를 보존하지 못합니다. 격자 경로를 선택해 주세요.")
     structured_warning = ""
-    if settings.topology_mode != "LEGACY":
+    if settings.topology_mode in {"AUTO", "STRUCTURED"}:
         try:
             structured = _try_structured_remesh(engine_input, progress=progress, cancelled=cancelled)
         except ValueError as exc:
@@ -70,6 +77,13 @@ def remesh_large(
             raise ValueError(f"필수 가이드의 연속 엣지 경로를 만들지 못했습니다: {', '.join(required_guides)}. 현재 입력 형상에서 필수 루프와 쿼드 띠를 배치할 수 없습니다.")
         if settings.topology_mode == "STRUCTURED":
             raise ValueError("이 형상과 가이드에는 연속 격자 배치를 만들 수 없습니다. 격자 경계를 지정하거나 실험 엔진을 선택해 주세요.")
+    quadriflow_warning = ""
+    if settings.topology_mode in {"AUTO", "QUADRIFLOW"}:
+        general, quadriflow_warning = try_quadriflow_remesh(engine_input, progress=progress, cancelled=cancelled)
+        if general is not None:
+            return general
+        if settings.topology_mode == "QUADRIFLOW":
+            raise ValueError(quadriflow_warning or "QuadriFlow 경로가 결과를 만들지 못했습니다.")
 
     _require_blender()
     _report(progress, 0.01, "큰 메시 전처리 준비")
@@ -167,6 +181,7 @@ def remesh_large(
     warnings = (
         "큰 메시 경로: 원본은 변경하지 않고 임시 프록시에서 리메시했습니다.",
         structured_warning,
+        quadriflow_warning,
         *cleanup_warnings,
         *proxy_cleanup_warnings,
         *proxy_notes,

@@ -8,8 +8,9 @@ class Zzamjak3DRemesherProperties(bpy.types.PropertyGroup):
         name="토폴로지 생성 방식",
         description="격자 경로를 우선 사용하거나 특정 경로만 실행합니다",
         items=(
-            ("AUTO", "자동", "지원되는 형상에는 연속 격자를 사용하고 나머지는 실험 엔진 사용 사실을 알립니다"),
+            ("AUTO", "자동", "지원되는 형상에는 연속 격자를, 나머지는 복셀 리메시와 QuadriFlow 경로를 사용합니다. 밀도 속성이나 DIRECTION 가이드가 있거나 두 경로가 모두 실패하면 실험 엔진 사용 사실을 알립니다"),
             ("STRUCTURED", "격자 전용", "격자 배치를 만들 수 없는 형상은 결과를 생성하지 않습니다"),
+            ("QUADRIFLOW", "QuadriFlow", "격자 탐색 없이 복셀 리메시 뒤 QuadriFlow 로 새 쿼드 와이어를 깔고 원본 표면에 투영합니다"),
             ("LEGACY", "실험 엔진", "기존 적응형 삼각 패치 엔진을 사용합니다"),
         ),
         default="AUTO",
