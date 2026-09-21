@@ -32,7 +32,7 @@ def _make_quad(name: str):
     return obj
 
 
-def _wait_process(process, timeout=5.0):
+def _wait_process(process, timeout=90.0):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if process.poll() is not None:

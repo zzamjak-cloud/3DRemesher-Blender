@@ -254,6 +254,12 @@ def main():
     assert_true(not hasattr(bpy.types.Scene, "zzamjak_3d_remesher"), "unregister 후 Scene 속성이 남아 있습니다.")
     module.register()
     assert_true(hasattr(bpy.types.Scene, "zzamjak_3d_remesher"), "register 후 Scene 속성이 없습니다.")
+    # 같은 Blender 세션에서 이어 도는 다른 검사가 이 가이드를 필수 LOOP/STRIP 으로 읽지 않도록 지운다.
+    for guide in (guide_obj, loop_obj):
+        curve = guide.data
+        bpy.data.objects.remove(guide, do_unlink=True)
+        bpy.data.curves.remove(curve)
+    assert_true(not adapter.collect_guide_curves(bpy.context.scene, obj), "스모크 가이드 커브가 정리되지 않았습니다.")
     print("Blender smoke test passed")
 
 

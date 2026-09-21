@@ -19,6 +19,9 @@ def run_job(source, mode: str, target: int, symmetry_x: bool):
     props.topology_mode = mode
     props.target_quad_count = target
     props.symmetry_x = symmetry_x
+    props.symmetry_y = False  # 같은 세션의 앞선 검사가 남긴 대칭 설정을 이어받지 않는다
+    props.symmetry_z = False
+    props.density_scale = 1.0
     before = operators._source_input_fingerprint(source, bpy.context.scene)
     engine_input, warnings = operators._build_engine_input(bpy.context, source)
     started = time.monotonic()
@@ -38,6 +41,9 @@ def run_job(source, mode: str, target: int, symmetry_x: bool):
         operators._cleanup_job_files(job)
 
 
+# 같은 세션의 앞선 검사가 남긴 가이드 커브가 있으면 AUTO 가 실험 엔진을 고르므로 먼저 지운다.
+for stray in [obj for obj in bpy.data.objects if obj.name.startswith("REMESH_GUIDE_")]:
+    bpy.data.objects.remove(stray, do_unlink=True)
 bpy.ops.object.select_all(action="DESELECT")
 bpy.ops.mesh.primitive_monkey_add()
 source = bpy.context.active_object
