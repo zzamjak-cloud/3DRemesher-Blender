@@ -89,7 +89,17 @@ while time.monotonic() < deadline:
     time.sleep(0.05)
 assert cancel_job.process.poll() is None, "취소 검사 전에 worker 가 끝났습니다."
 time.sleep(1.0)  # 자식 QuadriFlow 프로세스가 뜰 시간
-grandchildren = subprocess.run(["pgrep", "-f", "quadriflow_worker.py"], capture_output=True, text=True).stdout.split()
+
+
+def quadriflow_children() -> list[str]:
+    """QuadriFlow 자식 Blender 프로세스 PID. 이 검사 스크립트 자신(tests/blender_quadriflow_worker.py)은 제외한다."""
+    import os
+
+    found = subprocess.run(["pgrep", "-f", "addon/quadriflow_worker.py"], capture_output=True, text=True).stdout.split()
+    return [pid for pid in found if pid != str(os.getpid())]
+
+
+grandchildren = quadriflow_children()
 assert grandchildren, "취소 검사 시점에 QuadriFlow 자식 프로세스가 없습니다."
 operators._request_job_cancel(cancel_job, terminate=True)
 operators._cleanup_job_files(cancel_job)
@@ -97,7 +107,7 @@ assert cancel_job.process.poll() is not None
 assert not cancel_job.temp_dir.exists()
 deadline = time.monotonic() + 15.0
 while True:
-    survivors = subprocess.run(["pgrep", "-f", "quadriflow_worker.py"], capture_output=True, text=True).stdout.split()
+    survivors = quadriflow_children()
     if not survivors or time.monotonic() > deadline:
         break
     time.sleep(0.2)  # 종료 신호를 받은 Blender 가 내려가는 데 시간이 걸릴 수 있다
