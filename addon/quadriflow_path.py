@@ -36,6 +36,7 @@ from .core import (
 from .engine import MAX_ACCEPTED_ASPECT_RATIO, MAX_OUTPUT_QUADS, MAX_SURFACE_ERROR_RATIO
 
 MAX_SOURCE_FACES = 400000        # 이보다 큰 입력은 파이썬 변환 비용이 커 큰 메시 프록시 경로에 맡긴다
+MAX_BOUNDARY_EDGE_RATIO = 0.2    # 경계 엣지가 이 비율을 넘는 열린 판은 부피가 없어 복셀 리메시가 베개 형상을 만든다
 MIN_QUAD_RATIO = 0.95            # 구멍 메우기·삼각형 병합 뒤에도 남는 삼각형 허용 비율
 MERGE_DIST = 2e-4                # QuadriFlow 사전 검사가 '길이 0'으로 보는 1e-4 미만 엣지를 이 길이까지 늘린다
 FRAGMENT_RATIO = 0.005           # 전체 면수의 이 비율 미만인 떨어진 셸은 복셀 거품으로 보고 지운다
@@ -97,6 +98,12 @@ def unsupported_reason(engine_input: EngineInput) -> str:
         return f"목표 쿼드 수가 출력 상한 {MAX_OUTPUT_QUADS}을 넘습니다."
     if len(engine_input.mesh.faces) > MAX_SOURCE_FACES:
         return f"입력 면 수가 QuadriFlow 경로 상한 {MAX_SOURCE_FACES}을 넘습니다: {len(engine_input.mesh.faces)}"
+    analysis = engine_input.analysis
+    if analysis.edge_count and analysis.boundary_edge_count / analysis.edge_count > MAX_BOUNDARY_EDGE_RATIO:
+        return (
+            f"경계 엣지 비율이 {analysis.boundary_edge_count / analysis.edge_count:.0%} 인 열린 판 형상은 "
+            "복셀 리메시로 부피를 만들 수 없어 QuadriFlow 경로를 건너뜁니다."
+        )
     return ""
 
 

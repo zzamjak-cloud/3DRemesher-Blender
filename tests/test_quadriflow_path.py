@@ -36,6 +36,12 @@ class QuadriflowPathTests(unittest.TestCase):
         self.assertIn("LOOP/STRIP", unsupported_reason(engine_input))
         self.assertEqual(unsupported_reason(build_engine_input(_cube_mesh(), RemeshSettings())), "")
 
+    def test_open_sheet_is_unsupported(self):
+        plane = MeshData(((-1.0, -1.0, 0.0), (1.0, -1.0, 0.0), (1.0, 1.0, 0.0), (-1.0, 1.0, 0.0)), ((0, 1, 2, 3),))
+
+        self.assertIn("열린 판", unsupported_reason(build_engine_input(plane, RemeshSettings())))
+        self.assertEqual(unsupported_reason(build_engine_input(_cube_mesh(), RemeshSettings())), "")
+
     def test_auto_skips_quadriflow_without_bpy(self):
         engine_input = build_engine_input(_cube_mesh(), RemeshSettings(topology_mode="AUTO"))
 
@@ -103,7 +109,7 @@ class QuadriflowPathTests(unittest.TestCase):
         self.assertTrue(any("QuadriFlow" in warning for warning in result.warnings))
 
     def test_quadriflow_mode_propagates_path_failure(self):
-        engine_input = build_engine_input(_irregular_mesh(), RemeshSettings(target_quad_count=12, topology_mode="QUADRIFLOW"))
+        engine_input = build_engine_input(_cube_mesh(), RemeshSettings(target_quad_count=12, topology_mode="QUADRIFLOW"))
 
         with patch("addon.quadriflow_path.is_available", return_value=True), patch(
             "addon.quadriflow_path.remesh_quadriflow", side_effect=ValueError("의도한 실패")
