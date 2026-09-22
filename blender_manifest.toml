@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "zzamjak_3d_remesher"
-version = "0.5.0"
+version = "0.5.1"
 name = "3D Remesher"
 tagline = "대칭과 밀도를 제어하는 적응형 쿼드 리토폴로지"
 maintainer = "zzamjak-cloud"

@@ -80,7 +80,10 @@ def _run_remesh(obj, *, target=64, symmetry=(), density=False, guide=False, expe
 
 
 def _expect_quality_rejection(obj, *, target=128):
-    """실험 엔진의 종횡비 품질 게이트가 결과 적용을 막는지 확인한다. AUTO 는 이 토러스를 QuadriFlow 로 성공시키므로 LEGACY 를 강제한다."""
+    """실험 엔진의 종횡비 품질 게이트를 확인한다. AUTO 는 이 토러스를 QuadriFlow 로 성공시키므로 LEGACY 를 강제한다.
+
+    0.5.0 의 주곡률 방향 앵커 뒤로 균일 토러스는 종횡비 15.4 로 통과한다(이전 31.78 거부). 거부되면 원본 보존과
+    결과 미적용을, 적용되면 보고된 최대 종횡비가 상한 안인지와 원본 보존을 확인한다."""
     _activate(obj)
     props = bpy.context.scene.zzamjak_3d_remesher
     previous_mode = props.topology_mode
@@ -94,16 +97,26 @@ def _expect_quality_rejection(obj, *, target=128):
     before = _mesh_snapshot(obj)
     names = set(bpy.context.scene.objects.keys())
     try:
+        applied = False
         try:
             result = bpy.ops.object.zzamjak_3d_remesher_run()
         except RuntimeError as exc:
             assert_true("종횡비" in str(exc), f"예상과 다른 실패입니다: {exc}")
         else:
-            assert_true(result != {"FINISHED"}, "종횡비가 큰 토러스 결과가 적용되었습니다.")
-            assert_true("종횡비" in props.last_report, f"품질 거부 사유가 없습니다: {props.last_report}")
+            applied = result == {"FINISHED"}
+            assert_true("종횡비" in props.last_report, f"종횡비 보고가 없습니다: {props.last_report}")
         _assert_source_unchanged(obj, before)
-        assert_true(set(bpy.context.scene.objects.keys()) == names, "거부된 결과 오브젝트가 남았습니다.")
-        RESULTS.append({"name": obj.name, "input_faces": len(obj.data.polygons), "target": target, "quality_rejected": props.last_report})
+        created = set(bpy.context.scene.objects.keys()) - names
+        if applied:
+            import re
+            match = re.search(r"최대 종횡비: ([0-9.]+)", props.last_report)
+            assert_true(match is not None and float(match.group(1)) <= 20.0, f"적용된 결과의 종횡비가 상한을 넘습니다: {props.last_report}")
+            assert_true(len(created) == 1, f"결과 오브젝트가 하나여야 합니다: {created}")
+            for name in created:
+                bpy.data.objects.remove(bpy.data.objects[name], do_unlink=True)
+        else:
+            assert_true(not created, "거부된 결과 오브젝트가 남았습니다.")
+        RESULTS.append({"name": obj.name, "input_faces": len(obj.data.polygons), "target": target, "quality_applied": applied, "report": props.last_report})
     finally:
         props.topology_mode = previous_mode
 
