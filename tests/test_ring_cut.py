@@ -83,6 +83,14 @@ class RingCutTests(unittest.TestCase):
         self.assertEqual([cut.name for cut in merged], ["left", "neck"])
         self.assertEqual(mirror_cuts((left,), ()), (left,))
 
+    def test_two_rings_on_the_same_axis_are_kept_apart(self):
+        # 목 아래·위처럼 같은 축 위에 0.07 떨어진 링 둘은 중복이 아니다 (반지름 0.2, 띠 반폭 0.02)
+        low = RingCut("low", (0.0, 0.0, 1.19), (0.0, 0.0, 1.0), 0.2, 0.02, tuple((x, y, 1.19) for x, y, _z in _ring(8, 0.2, 0.0)))
+        high = RingCut("high", (0.0, 0.0, 1.26), (0.0, 0.0, 1.0), 0.22, 0.02, tuple((x, y, 1.26) for x, y, _z in _ring(8, 0.22, 0.0)))
+        same = RingCut("same", (0.01, 0.0, 1.20), (0.0, 0.0, 1.0), 0.2, 0.02, low.points)
+        self.assertEqual([c.name for c in mirror_cuts((low, high), ("X",))], ["low", "high"])
+        self.assertEqual([c.name for c in mirror_cuts((low, same), ("X",))], ["low"])
+
     def test_chain_with_one_small_gap_is_treated_as_closed_ring(self):
         ring = _ring(12, 1.0, 0.0)
         verts = [_Vert(p) for p in ring]

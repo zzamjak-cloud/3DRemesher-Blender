@@ -34,12 +34,13 @@ class ZJREMESH_PT_sidebar(bpy.types.Panel):
 
         layout.label(text="가이드 커브: REMESH_GUIDE_ 접두사")
         layout.label(text="튜브: LOOP=둘레, STRIP_=세로")
+        _draw_ring_guides(layout, context)
         if props.topology_mode == "LEGACY":
             layout.label(text="실험 엔진: 루프 흐름 미보장", icon="INFO")
         elif props.topology_mode == "STRUCTURED":
             layout.label(text="격자 미지원 형상은 실행 중단", icon="INFO")
         elif props.topology_mode == "QUADRIFLOW":
-            layout.label(text="복셀 리메시 후 QuadriFlow, 가이드 미보존", icon="INFO")
+            layout.label(text="복셀 리메시 후 QuadriFlow, LOOP=절단 링", icon="INFO")
 
         layout.operator("object.zzamjak_3d_remesher_prepare_density", icon="GROUP_VCOL")
         layout.operator("object.zzamjak_3d_remesher_analyze", icon="VIEWZOOM")
@@ -59,6 +60,37 @@ class ZJREMESH_PT_sidebar(bpy.types.Panel):
 
 
 CLASSES = (ZJREMESH_PT_sidebar,)
+
+
+RING_GUIDE_LIST_LIMIT = 8  # 패널은 매 리드로우마다 그려지므로 목록을 이 개수까지만 보여 준다
+
+
+def _draw_ring_guides(layout, context) -> None:
+    from .ring_geometry import RIM_OK_RATIO
+    from .ring_guide import ring_guides
+
+    box = layout.box()
+    box.label(text="링 가이드 (팔·다리·목)")
+    row = box.row(align=True)
+    row.operator("object.zzamjak_3d_remesher_add_ring_guide", icon="CURVE_NCIRCLE")
+    row.operator("object.zzamjak_3d_remesher_check_ring_guides", text="", icon="FILE_REFRESH")
+    row.operator("object.zzamjak_3d_remesher_clear_ring_guides", text="", icon="TRASH")
+    box.label(text="좌클릭 추가 · Ctrl+Z 마지막 취소 · 우클릭 종료")
+    active = context.active_object
+    active_props = getattr(active, "zzamjak_ring_guide", None) if active is not None and active.type == "CURVE" else None
+    if active_props is not None and active_props.is_ring:
+        box.prop(active_props, "offset")
+        row = box.row(align=True)
+        row.label(text=f"{active_props.status} (둘레 비율 {active_props.ratio:.2f})", icon="CHECKMARK" if active_props.ratio >= RIM_OK_RATIO else "ERROR")
+        row.operator("object.zzamjak_3d_remesher_remove_ring_guide", text="", icon="X").name = active.name
+    others = [guide for guide in ring_guides(context.scene) if guide is not active]
+    for guide in others[:RING_GUIDE_LIST_LIMIT]:
+        props = guide.zzamjak_ring_guide
+        row = box.row(align=True)
+        row.label(text=f"{guide.name}  {props.ratio:.2f}", icon="CHECKMARK" if props.ratio >= RIM_OK_RATIO else "ERROR")
+        row.operator("object.zzamjak_3d_remesher_remove_ring_guide", text="", icon="X").name = guide.name
+    if len(others) > RING_GUIDE_LIST_LIMIT:
+        box.label(text=f"외 {len(others) - RING_GUIDE_LIST_LIMIT}개")
 
 
 def _wrapped_report_lines(report: str, context):

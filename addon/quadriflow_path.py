@@ -34,7 +34,7 @@ from .core import (
     analyze_mesh,
 )
 from .engine import MAX_ACCEPTED_ASPECT_RATIO, MAX_OUTPUT_QUADS, MAX_SURFACE_ERROR_RATIO
-from .ring_cut import BAND_LOOSE, RingCut, cut_bands, in_band, mirror_cuts, ring_cuts, stitch_bands
+from .ring_cut import BAND_LOOSE, MIN_RING_GAP_RATIO, RingCut, crowded_pairs, cut_bands, in_band, mirror_cuts, ring_cuts, stitch_bands
 from .topology.quality import ring_propagation
 
 MAX_SOURCE_FACES = 400000        # 이보다 큰 입력은 파이썬 변환 비용이 커 큰 메시 프록시 경로에 맡긴다
@@ -167,6 +167,11 @@ def remesh_quadriflow(
         # LOOP 가이드는 절단 링이 된다. 대칭이면 양의 반쪽만 깔리므로 음의 쪽 루프는 양의 쪽으로 미러해 처리한다.
         requested_cuts = mirror_cuts(ring_cuts(engine_input, math.sqrt(source_area / max(target, 1))), axes)
         cuts: tuple[RingCut, ...] = ()
+        for first, second, gap in crowded_pairs(requested_cuts):
+            warnings.append(
+                f"LOOP '{first}' 와 '{second}' 의 간격({gap:.3g})이 출력 쿼드 {MIN_RING_GAP_RATIO:.0f}개보다 좁아 접합이 서로 간섭할 수 있습니다. "
+                "더 벌리거나 목표 쿼드 수를 올려 주세요."
+            )
         half_output = False
         success = False
         failure_notes: list[str] = []
@@ -174,6 +179,7 @@ def remesh_quadriflow(
         step = -1
         seam_reports: tuple = ()
         stitch_retries = 0
+        max_stitch_retries = len(requested_cuts)  # 실패한 루프를 하나씩 빼므로 루프 수만큼이면 충분하다
         while step + 1 < len(ladder):
             step += 1
             density, triangles = ladder[step]
@@ -222,7 +228,7 @@ def remesh_quadriflow(
                     seam for seam in seam_reports
                     if not seam.bridged or (not seam.closed and not (axes if outcome else ()))
                 ]
-                if failed and stitch_retries < len(requested_cuts):
+                if failed and stitch_retries < max_stitch_retries:
                     # 접합 못 한 루프는 빼고 같은 단계를 다시 돈다 — 나머지 루프의 링은 살린다
                     for seam in failed:
                         warnings.append(
@@ -261,6 +267,9 @@ def remesh_quadriflow(
         _shrinkwrap(work_obj, source_obj, voxel * SHRINK_LIMIT, plane_axes, scale, cancelled=cancelled)
         if plane_axes:
             _report(progress, 0.88, "대칭면 기준 미러 용접")
+            lifted = _lift_interior_plane_vertices(work_obj, plane_axes, scale)
+            if lifted:
+                warnings.append(f"대칭면 위 내부 정점 {lifted}개를 미러 용접에서 분리했습니다.")
             _mirror(work_obj, plane_axes, scale)
 
         _check_cancelled(cancelled)
@@ -907,6 +916,24 @@ def _repair_output(obj, plane_axes: tuple[str, ...], scale: float) -> None:
                         plane_vertices[vertex] = max(tolerance, plane_vertices.get(vertex, 0.0))
                 continue
             open_holes = True
+            if plane_axes:
+                # 대칭면 루프에 붙은 작은 구멍은 한 경계 성분으로 합쳐진다. 평면 위 엣지는 절대 메우지 않고(평면을
+                # 가로지르는 웹이 생긴다 — 실측 2026-09-23, 목 안쪽 웹으로 표면 오차 0.127), 평면 밖 체인만 '만(灣)' 으로 닫는다
+                plane_edges, bays = _split_plane_loop(loop, plane_axes, scale)
+                if plane_edges:
+                    tolerance = _plane_snap_tolerance(loop, scale)
+                    for edge in plane_edges:
+                        for vertex in edge.verts:
+                            plane_vertices[vertex] = max(tolerance, plane_vertices.get(vertex, 0.0))
+                    for chain in bays:
+                        if 3 <= len(chain) <= HOLE_MAX_EDGES:
+                            # 만은 평면을 따라 얇게 누운 띠라 중심 정점 부채는 슬리버(실측 종횡비 31)를 남긴다 — n각형 하나로 닫고
+                            # 뒤의 삼각화·병합에 맡긴다
+                            try:
+                                bm.faces.new(chain)
+                            except ValueError:
+                                pass
+                    continue
             ordered = _ordered_loop_vertices(loop)
             if ordered is not None and 3 <= len(ordered) <= HOLE_MAX_EDGES and _fill_loop(bm, ordered):
                 continue
@@ -930,6 +957,46 @@ def _repair_output(obj, plane_axes: tuple[str, ...], scale: float) -> None:
     bm.to_mesh(obj.data)
     bm.free()
     obj.data.update()
+
+
+def _split_plane_loop(loop, plane_axes: tuple[str, ...], scale: float):
+    """경계 루프를 대칭면 위 엣지와, 평면 밖으로 튀어나온 열린 체인(정점 열)들로 나눈다.
+    평면 위 엣지가 없으면 ([], []) — 보통의 구멍이다."""
+    tolerance = _plane_snap_tolerance(loop, scale)
+
+    def on_plane(vertex) -> bool:
+        return any(abs(vertex.co["XYZ".index(axis)]) < tolerance for axis in plane_axes)
+
+    plane_edges = [edge for edge in loop if all(on_plane(v) for v in edge.verts)]
+    if not plane_edges:
+        return [], []
+    others = [edge for edge in loop if edge not in set(plane_edges)]
+    adjacency: dict = {}
+    for edge in others:
+        a, b = edge.verts
+        adjacency.setdefault(a, []).append(b)
+        adjacency.setdefault(b, []).append(a)
+    chains = []
+    seen: set = set()
+    for start in adjacency:
+        if start in seen or len(adjacency[start]) != 1:
+            continue
+        chain = [start]
+        seen.add(start)
+        previous, current = None, start
+        while True:
+            following = [v for v in adjacency[current] if v is not previous]
+            if not following:
+                break
+            previous, current = current, following[0]
+            if current in seen:
+                break
+            chain.append(current)
+            seen.add(current)
+        # 양 끝이 평면 위에 있어야 평면 쪽 변 하나로 닫히는 만(灣)이다
+        if len(chain) >= 3 and on_plane(chain[0]) and on_plane(chain[-1]):
+            chains.append(chain)
+    return plane_edges, chains
 
 
 def _fill_loop(bm, ordered) -> bool:
@@ -983,6 +1050,33 @@ def _snap_plane_vertices(plane_vertices: dict, plane_axes: tuple[str, ...]) -> N
         nearest = min(components, key=lambda component: abs(vertex.co[component]))
         if abs(vertex.co[nearest]) < tolerance:
             vertex.co[nearest] = 0.0
+
+
+def _lift_interior_plane_vertices(obj, plane_axes: tuple[str, ...], scale: float) -> int:
+    """대칭면 위에 놓인 내부 정점(경계가 아닌 정점)을 미러 용접 임계값보다 살짝 안쪽으로 민다. 민 정점 수를 돌려준다.
+
+    구멍 메우기가 대칭면 옆에 남긴 얇은 웹의 내부 정점이 평면 위에 있으면, 미러가 그 정점을 자신의 거울상과
+    용접해 면 4개짜리 비다양체 엣지가 된다(실측 2026-09-23, 목표 3,000·목 링 둘: 3개). 경계 정점은 용접돼야
+    하므로 두고, 내부 정점만 임계값의 두 배만큼 띄우면 거울상과 분리된 채 표면은 그대로다(모델 크기의 2e-5)."""
+    import bmesh
+
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    threshold = SNAP_TOLERANCE_RATIO * scale
+    lifted = 0
+    for vertex in bm.verts:
+        if vertex.is_boundary:
+            continue
+        for axis in plane_axes:
+            component = "XYZ".index(axis)
+            if abs(vertex.co[component]) < threshold * 1.5:
+                vertex.co[component] = threshold * 2.0
+                lifted += 1
+    if lifted:
+        bm.to_mesh(obj.data)
+        obj.data.update()
+    bm.free()
+    return lifted
 
 
 def _mirror(obj, axes: tuple[str, ...], scale: float) -> None:

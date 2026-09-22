@@ -22,12 +22,15 @@ STITCH_REACH = 1.1     # 접합 때 캡·경계 링 정점을 측정한 표면 �
 CAP_DISTANCE = 2.5     # 띠 반폭의 이 배수 안에 정점이 모두 있고 법선이 절단 평면과 나란하면 QuadriFlow 캡으로 본다
 CAP_NORMAL_DOT = 0.7   # QuadriFlow 캡은 경계 정점이 떠서 기울어진다(실측: 0.85 로 좁히면 놓쳐 잘못된 접합이 생김). 벽면 오인은 CAP_RADIUS 가 막는다
 RIM_LENGTH_MIN_RATIO = 0.5  # 절단 띠 양쪽 둘레 길이가 이 비율보다 어긋나면 평면이 이웃 부위를 함께 지난 것이라 자르지 않는다
+MAX_BRIDGE_EDGE_RATIO = 4.0  # 접합으로 생긴 엣지가 링 엣지 평균의 이 배수를 넘으면 잘못된 짝이다
 RING_SIZE_MIN_RATIO = 0.35  # 양쪽 링 정점 수가 이 비율보다 어긋나면 한쪽이 링이 아니라 구멍으로 본다 (발목→발등처럼 단면이 급변하면 10·24 도 나온다)
 MIN_HALF_WIDTH_RATIO = 0.01  # 띠 반폭 하한 = 링 반지름 × 이 비율
 BAND_LOOSE = 2.5       # QuadriFlow 경계 정점은 엣지 길이 절반 정도 평면에서 뜨므로 띠 반폭의 이 배수까지 띠로 본다
 TRIANGLE_PENALTY = 4.0 # 브리지 DP 에서 삼각형 하나에 평균 엣지 길이의 이 배수를 더해 꼭 필요한 곳에만 쓰게 한다
 MIN_RING_VERTICES = 3
 GAP_CLOSE_RATIO = 1.8  # 열린 체인의 끝점 거리가 평균 엣지의 이 배수 안이면 작은 구멍으로 끊긴 닫힌 링으로 본다
+ARC_JOIN_RATIO = 3.5   # 같은 쪽 열린 호 조각의 끝점이 이 배수 안이면 한 호로 이어 붙인다 (대칭면 모서리 구멍은 엣지 2~3개 폭)
+MIN_RING_GAP_RATIO = 3.0  # 이웃 링과의 축 방향 간격이 (띠 반폭 합)의 이 배수보다 좁으면 접합이 서로 간섭한다고 경고한다
 SMALL_CYCLE_MAX = 8    # 링에 붙은 부속 사이클이 이 정점 수 이하면 QuadriFlow 구멍으로 보고 링에서 떼어낸다
 
 
@@ -98,10 +101,32 @@ def mirror_cuts(cuts: tuple[RingCut, ...], axes: tuple[str, ...]) -> tuple[RingC
             )
     unique: list[RingCut] = []
     for cut in result:
-        if any(_distance(cut.center, kept.center) < min(cut.radius, kept.radius) * 0.5 for kept in unique):
+        if any(_same_ring(cut, kept) for kept in unique):
             continue
         unique.append(cut)
     return tuple(unique)
+
+
+def crowded_pairs(cuts: tuple[RingCut, ...]) -> tuple[tuple[str, str, float], ...]:
+    """축 방향 간격이 좁아 접합이 서로 간섭할 수 있는 링 쌍 (이름, 이름, 간격)."""
+    pairs = []
+    for i, a in enumerate(cuts):
+        for b in cuts[i + 1:]:
+            offset = tuple(a.center[k] - b.center[k] for k in range(3))
+            along = abs(sum(offset[k] * b.normal[k] for k in range(3)))
+            lateral = sqrt(max(0.0, sum(o * o for o in offset) - along * along))
+            if lateral < max(a.radius, b.radius) and along < (a.half_width + b.half_width) * MIN_RING_GAP_RATIO:
+                pairs.append((a.name, b.name, along))
+    return tuple(pairs)
+
+
+def _same_ring(a: RingCut, b: RingCut) -> bool:
+    """두 루프가 같은 자리의 같은 링인가 — 축 방향 간격이 띠 폭 안이고 옆으로도 반지름 절반 안일 때만.
+    목처럼 같은 축 위에 가까이 둔 링 둘은 중심 거리만 보면 중복으로 잘못 합쳐진다(실측 0.07 간격)."""
+    offset = tuple(a.center[i] - b.center[i] for i in range(3))
+    along = abs(sum(offset[i] * b.normal[i] for i in range(3)))
+    lateral = sqrt(max(0.0, sum(o * o for o in offset) - along * along))
+    return along <= (a.half_width + b.half_width) and lateral < min(a.radius, b.radius) * 0.5
 
 
 def _mirror_point(point, component: int):
@@ -247,16 +272,20 @@ def stitch_bands(mesh, cuts: tuple[RingCut, ...], *, cancelled: CancelledCallbac
             if e.is_boundary and all(abs(cut.signed_distance(v.co)) <= limit and cut.within(v.co, STITCH_REACH, slack) for v in e.verts)
         ]
         chains = _chains(edges)
-        # 같은 쪽에 QuadriFlow 가 남긴 작은 구멍(실측 4정점)이 함께 잡히므로 가장 긴 체인만 링으로 쓴다. 구멍은 뒤에서 메운다.
-        negative = sorted((c for c in chains if sum(cut.signed_distance(v.co) for v in c[0]) < 0.0), key=lambda c: -len(c[0]))
-        positive = sorted((c for c in chains if sum(cut.signed_distance(v.co) for v in c[0]) >= 0.0), key=lambda c: -len(c[0]))
+        # 같은 쪽에 QuadriFlow 가 남긴 작은 구멍(실측 4정점)이 함께 잡히므로, 끝점이 맞닿는 열린 조각은 하나의 호로 이어 붙이고
+        # (대칭면 모서리에서 호가 8·19 처럼 갈라졌다) 그중 가장 긴 체인만 링으로 쓴다. 구멍은 뒤에서 메운다.
+        negative = sorted(_merge_open_chains([c for c in chains if sum(cut.signed_distance(v.co) for v in c[0]) < 0.0]), key=lambda c: -len(c[0]))
+        positive = sorted(_merge_open_chains([c for c in chains if sum(cut.signed_distance(v.co) for v in c[0]) >= 0.0]), key=lambda c: -len(c[0]))
         if not negative or not positive:
             sizes = (len(negative[0][0]) if negative else 0, len(positive[0][0]) if positive else 0)
             reports.append(SeamReport(cut.name, sizes, False, 0, False, "한쪽 경계 링을 찾지 못함"))
             continue
         (a_verts, a_closed), (b_verts, b_closed) = negative[0], positive[0]
         closed = a_closed and b_closed
-        if min(len(a_verts), len(b_verts)) < max(len(a_verts), len(b_verts)) * RING_SIZE_MIN_RATIO or a_closed != b_closed:
+        a_length = _mean_step([tuple(v.co) for v in a_verts], a_closed) * (len(a_verts) if a_closed else len(a_verts) - 1)
+        b_length = _mean_step([tuple(v.co) for v in b_verts], b_closed) * (len(b_verts) if b_closed else len(b_verts) - 1)
+        length_ok = min(a_length, b_length) >= max(a_length, b_length) * RING_SIZE_MIN_RATIO
+        if min(len(a_verts), len(b_verts)) < max(len(a_verts), len(b_verts)) * RING_SIZE_MIN_RATIO or a_closed != b_closed or not length_ok:
             # 캡을 못 지웠거나 구멍이 링을 끊은 것. 잘못 이으면 팔 안쪽을 가로지르거나 겹친 면이 생기므로
             # (Blender 일반 브리지 폴백은 실측에서 비다양체 엣지 14개를 만들었다) 이유를 남기고 실패로 보고한다.
             reason = "한쪽 링이 열림" if a_closed != b_closed else "양쪽 링 정점 수 차이가 큼"
@@ -265,10 +294,25 @@ def stitch_bands(mesh, cuts: tuple[RingCut, ...], *, cancelled: CancelledCallbac
         faces = _bridge(bm, a_verts, b_verts, closed)
         triangles = [f for f in faces if f.is_valid and len(f.verts) == 3]
         if triangles:
-            bmesh.ops.join_triangles(
+            result = bmesh.ops.join_triangles(
                 bm, faces=triangles, cmp_seam=False, cmp_sharp=False, cmp_uvs=False, cmp_vcols=False,
                 cmp_materials=False, angle_face_threshold=pi, angle_shape_threshold=pi,
             )
+            faces = [f for f in faces if f.is_valid] + [f for f in result.get("faces", []) if f.is_valid]
+        # 턱 바로 아래처럼 이웃 링·구멍과 겹치는 자리에서는 브리지가 기존 면 위에 면을 얹어 비다양체가 되거나(실측: 목표
+        # 3,000 에서 엣지 3개), 조각난 호와 짝을 지어 목을 가로지르는 긴 면을 만든다(실측: 엣지 0.37, 전형 0.036).
+        # 그 접합은 되돌리고 실패로 보고해 호출자가 이 루프를 빼고 다시 깔게 한다.
+        typical = max(_mean_step([tuple(v.co) for v in a_verts], a_closed), _mean_step([tuple(v.co) for v in b_verts], b_closed), 1.0e-9)
+        live = [f for f in faces if f.is_valid]
+        problem = ""
+        if any(len(e.link_faces) > 2 for f in live for e in f.edges):
+            problem = "접합이 겹친 면을 만듦"
+        elif any(e.calc_length() > typical * MAX_BRIDGE_EDGE_RATIO for f in live for e in f.edges):
+            problem = "접합 면이 지나치게 김"
+        if problem:
+            bmesh.ops.delete(bm, geom=live, context="FACES")
+            reports.append(SeamReport(cut.name, (len(a_verts), len(b_verts)), closed, 0, False, problem))
+            continue
         remaining = sum(1 for f in faces if f.is_valid and len(f.verts) == 3)
         reports.append(SeamReport(cut.name, (len(a_verts), len(b_verts)), closed, remaining, bool(faces)))
     bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
@@ -352,6 +396,42 @@ def _chains(edges) -> list[tuple[list, bool]]:
         if len(ordered) >= (MIN_RING_VERTICES if closed else 2):
             chains.append((ordered, closed))
     return chains
+
+
+def _merge_open_chains(chains: list) -> list:
+    """열린 체인들 중 끝점이 평균 엣지의 GAP_CLOSE_RATIO 배 안에서 맞닿는 것들을 하나로 이어 붙인다. 닫힌 체인은 그대로."""
+    closed = [c for c in chains if c[1]]
+    open_chains = [list(c[0]) for c in chains if not c[1]]
+    merged: list = []
+    while open_chains:
+        current = open_chains.pop(0)
+        step = _mean_step([tuple(v.co) for v in current], False) or 1.0e-9
+        tolerance = step * ARC_JOIN_RATIO
+        joined = True
+        while joined:
+            joined = False
+            for other in list(open_chains):
+                ends = {
+                    (0, 0): _distance(tuple(current[0].co), tuple(other[0].co)),
+                    (0, -1): _distance(tuple(current[0].co), tuple(other[-1].co)),
+                    (-1, 0): _distance(tuple(current[-1].co), tuple(other[0].co)),
+                    (-1, -1): _distance(tuple(current[-1].co), tuple(other[-1].co)),
+                }
+                key = min(ends, key=ends.get)
+                if ends[key] > tolerance:
+                    continue
+                if key == (-1, 0):
+                    current = current + other
+                elif key == (-1, -1):
+                    current = current + other[::-1]
+                elif key == (0, -1):
+                    current = other + current
+                else:
+                    current = other[::-1] + current
+                open_chains.remove(other)
+                joined = True
+        merged.append((current, False))
+    return closed + merged
 
 
 def _detach_small_cycles(adjacency: dict) -> None:
