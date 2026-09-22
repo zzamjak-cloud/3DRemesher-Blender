@@ -34,6 +34,8 @@ from .core import (
     analyze_mesh,
 )
 from .engine import MAX_ACCEPTED_ASPECT_RATIO, MAX_OUTPUT_QUADS, MAX_SURFACE_ERROR_RATIO
+from .ring_cut import BAND_LOOSE, RingCut, cut_bands, in_band, mirror_cuts, ring_cuts, stitch_bands
+from .topology.quality import ring_propagation
 
 MAX_SOURCE_FACES = 400000        # 이보다 큰 입력은 파이썬 변환 비용이 커 큰 메시 프록시 경로에 맡긴다
 MAX_BOUNDARY_EDGE_RATIO = 0.2    # 경계 엣지가 이 비율을 넘는 열린 판은 부피가 없어 복셀 리메시가 베개 형상을 만든다
@@ -66,6 +68,11 @@ RELAX_ROUNDS = 2
 RELAX_FACTOR = 0.5
 SLIVER_ASPECT = 8.0              # 이 종횡비를 넘는 면의 정점만 골라 다시 편다 — 실측(갱스터 6,000쿼드): 22.2 → 7.6
 SLIVER_ROUNDS = 20               # 슬리버 완화 반복 상한. 남는 몇 개는 형상이 실제로 접힌 곳이다
+RING_CHECK_DEPTH = 4             # LOOP 접합부 바깥으로 닫힌 평행 링을 이 개수까지 세어 보고한다
+BAND_LOOP_MAX_RATIO = 3.0        # 절단 띠 안의 경계 루프가 예상 링 둘레(엣지 수)의 이 배수를 넘으면 구멍으로 본다
+BORDER_WELD_RATIO = 0.05         # 구멍·대칭면 경계 정점을 전형 엣지 길이의 이 비율 안에서 용접한다
+TINY_EDGE_RATIO = 0.1            # 전형 엣지 길이의 이 비율보다 짧은 출력 엣지는 QuadriFlow 가 남긴 미세 면 뭉치다
+TINY_EDGE_MAX_SHARE = 0.005      # 미세 엣지가 전체의 이 비율을 넘는 출력은 버리고 다음 시드로 간다 (실측 2026-09-22, Y 대칭+절단 링: 붕괴시키면 삼각형 44개)
 
 _WORKER = Path(__file__).with_name("quadriflow_worker.py")
 _TEMP_ROOT: Path | None = None
@@ -90,12 +97,9 @@ def is_available() -> bool:
 
 def unsupported_reason(engine_input: EngineInput) -> str:
     """이 경로가 입력을 받을 수 없으면 사유를, 받을 수 있으면 빈 문자열을 돌려준다."""
-    required = tuple(
-        guide.name for guide in engine_input.guide_curves
-        if any(kind in {"LOOP", "STRIP"} for kind in guide.kind)
-    )
-    if required:
-        return f"QuadriFlow 경로는 필수 LOOP/STRIP 가이드를 출력 엣지로 보존하지 못합니다: {', '.join(required)}"
+    strips = tuple(guide.name for guide in engine_input.guide_curves if "STRIP" in guide.kind)
+    if strips:
+        return f"QuadriFlow 경로는 필수 STRIP 가이드를 출력 엣지로 보존하지 못합니다: {', '.join(strips)}"
     if engine_input.settings.target_quad_count > MAX_OUTPUT_QUADS:
         return f"목표 쿼드 수가 출력 상한 {MAX_OUTPUT_QUADS}을 넘습니다."
     if len(engine_input.mesh.faces) > MAX_SOURCE_FACES:
@@ -160,10 +164,20 @@ def remesh_quadriflow(
 
         source_area = sum(polygon.area for polygon in source_obj.data.polygons)
         voxel = _voxel_size(source_area, scale, QF_INPUT_LADDER[0][0])
+        # LOOP 가이드는 절단 링이 된다. 대칭이면 양의 반쪽만 깔리므로 음의 쪽 루프는 양의 쪽으로 미러해 처리한다.
+        requested_cuts = mirror_cuts(ring_cuts(engine_input, math.sqrt(source_area / max(target, 1))), axes)
+        cuts: tuple[RingCut, ...] = ()
         half_output = False
         success = False
         failure_notes: list[str] = []
-        for step, (density, triangles) in enumerate(QF_INPUT_LADDER):
+        ladder = list(QF_INPUT_LADDER)
+        step = -1
+        seam_reports: tuple = ()
+        stitch_retries = 0
+        while step + 1 < len(ladder):
+            step += 1
+            density, triangles = ladder[step]
+            cuts = ()  # 단계마다 복셀 리메시로 새 메시가 되므로 이전 단계의 절단 링을 이어 쓰지 않는다
             _check_cancelled(cancelled)
             remaining = QF_TOTAL_BUDGET - (time.monotonic() - started)
             if remaining <= 0.0:
@@ -185,18 +199,58 @@ def remesh_quadriflow(
             if not _make_manifold(work_obj):
                 failure_notes.append(f"{density}/{triangles} 단계에서 QuadriFlow 입력 조건을 만들지 못했습니다.")
                 continue
+            if requested_cuts:
+                _report(progress, base + 0.09, f"LOOP 가이드 {len(requested_cuts)}개 위치에 절단 띠 생성")
+                cuts, skipped = cut_bands(work_obj.data, requested_cuts, scale, min(MERGE_DIST, 1e-3 * scale), cancelled=cancelled)
+                # 쓸 수 없는 루프는 결과를 막지 않고 경고로 알려 위치를 고칠 수 있게 한다
+                warnings.extend(skipped)
+                remaining = QF_TOTAL_BUDGET - (time.monotonic() - started)
+                if remaining <= 0.0:
+                    failure_notes.append(f"전체 시간 예산 {QF_TOTAL_BUDGET:.0f}초를 넘겨 남은 단계를 건너뛰었습니다.")
+                    break
             _check_cancelled(cancelled)
             _report(progress, base + 0.10, f"QuadriFlow 실행 (목표 {target}쿼드)")
-            outcome = _quadriflow(work_obj, target, axes, scale, remaining, cancelled=cancelled)
+            outcome = _quadriflow(work_obj, target, axes, scale, remaining, cuts, cancelled=cancelled)
             if outcome is None:
                 failure_notes.append(f"{density}/{triangles} 단계의 QuadriFlow 시도가 모두 실패했습니다.")
                 continue
+            if cuts:
+                _check_cancelled(cancelled)
+                _report(progress, base + 0.18, "절단 링 접합")
+                seam_reports = stitch_bands(work_obj.data, cuts, cancelled=cancelled)
+                failed = [
+                    seam for seam in seam_reports
+                    if not seam.bridged or (not seam.closed and not (axes if outcome else ()))
+                ]
+                if failed and stitch_retries < len(requested_cuts):
+                    # 접합 못 한 루프는 빼고 같은 단계를 다시 돈다 — 나머지 루프의 링은 살린다
+                    for seam in failed:
+                        warnings.append(
+                            f"LOOP '{seam.name}' 의 절단 링을 접합하지 못해({seam.note or '링이 닫히지 않음'}, "
+                            f"양쪽 {seam.ring_sizes[0]}·{seam.ring_sizes[1]}정점) 이 루프를 빼고 다시 깔았습니다. "
+                            "단면이 일정한 위치로 옮겨 주세요."
+                        )
+                    names = {seam.name for seam in failed}
+                    requested_cuts = tuple(cut for cut in requested_cuts if cut.name not in names)
+                    stitch_retries += 1
+                    step -= 1
+                    continue
+                if failed:
+                    raise ValueError(
+                        f"LOOP 가이드 '{failed[0].name}' 의 절단 링을 접합하지 못했습니다 "
+                        f"(양쪽 링 정점 {failed[0].ring_sizes[0]}·{failed[0].ring_sizes[1]}, {failed[0].note or '링이 닫히지 않음'})."
+                    )
             half_output = outcome
             success = True
             break
         if not success:
             raise ValueError("QuadriFlow 가 쓸 수 있는 쿼드 메시를 만들지 못했습니다. " + " ".join(failure_notes))
         plane_axes = axes if half_output else ()
+        for seam in seam_reports:
+            warnings.append(
+                f"LOOP '{seam.name}': 절단 링 {seam.ring_sizes[0]}·{seam.ring_sizes[1]}정점을 접합했습니다"
+                + (f" (전이 삼각형 {seam.triangles}개)." if seam.triangles else ".")
+            )
 
         _check_cancelled(cancelled)
         _report(progress, 0.74, "QuadriFlow 출력 정리")
@@ -252,6 +306,8 @@ def remesh_quadriflow(
             raise ValueError(f"QuadriFlow 결과에 메우지 못한 열린 경계 {analysis.boundary_edge_count}개가 남았습니다.")
         if engine_input.analysis.boundary_edge_count:
             warnings.append("복셀 리메시가 열린 경계를 닫아 결과는 닫힌 표면입니다.")
+        for cut in cuts:
+            warnings.append(_ring_report(output, cut))
         warnings.insert(0, f"QuadriFlow 경로: 복셀 리메시 뒤 새 와이어를 깔고 원본 표면에 투영했습니다 ({time.monotonic() - started:.1f}초).")
 
         _report(progress, 1.0, "QuadriFlow 완료")
@@ -504,12 +560,15 @@ def _stretch_tiny_edges(bm) -> int:
 
 # --- QuadriFlow ------------------------------------------------------------
 
-def _quadriflow(obj, target: int, axes: tuple[str, ...], scale: float, budget: float, *, cancelled: CancelledCallback | None) -> bool | None:
+def _quadriflow(
+    obj, target: int, axes: tuple[str, ...], scale: float, budget: float, cuts: tuple[RingCut, ...] = (), *,
+    cancelled: CancelledCallback | None,
+) -> bool | None:
     """자식 Blender 에서 QuadriFlow 를 돌려 결과 메시로 바꾼다.
 
     대칭 축이 있으면 양의 반쪽만 잘라 경계를 보존한 채 깔고 True 를 돌려준다(호출자가 미러한다).
     비대칭 결과는 대칭 검사를 통과할 수 없으므로 반쪽이 실패하면 폴백 없이 None 을 돌려준다.
-    대칭 축이 없으면 닫힌 전체를 깔고 False, 실패하면 None 이다."""
+    대칭 축이 없으면 전체를 깔고 False, 실패하면 None 이다. 절단 띠가 있으면 그 경계도 보존한다."""
     import bpy
 
     max_shells = _shell_count(obj.data) + QF_EXTRA_SHELLS
@@ -527,7 +586,7 @@ def _quadriflow(obj, target: int, axes: tuple[str, ...], scale: float, budget: f
                 bpy.data.libraries.write(src, {half}, fake_user=True)
                 mesh = _race_quadriflow(
                     src, work_dir, request, expected=request, preserve_boundary=True, max_shells=max_shells,
-                    plane_axes=axes, scale=scale, timeout=timeout, attempts=QF_ATTEMPTS, cancelled=cancelled,
+                    plane_axes=axes, scale=scale, timeout=timeout, attempts=QF_ATTEMPTS, cuts=cuts, cancelled=cancelled,
                 )
             finally:
                 bpy.data.meshes.remove(half)
@@ -536,12 +595,13 @@ def _quadriflow(obj, target: int, axes: tuple[str, ...], scale: float, budget: f
             mesh.use_fake_user = False
             _replace_mesh(obj, mesh)
             return True
+        # 절단 띠가 있어도 닫힌 전체 입력은 요청보다 모자라게 나온다 (실측 2026-09-22, 복셀 입력: 요청 1,500 → 1,261)
         request = max(int(target * QF_REQUEST_SCALE), 4)
         src = os.path.join(work_dir, "in.blend")
         bpy.data.libraries.write(src, {obj.data}, fake_user=True)
         mesh = _race_quadriflow(
-            src, work_dir, request, expected=target, preserve_boundary=False, max_shells=max_shells,
-            plane_axes=(), scale=scale, timeout=timeout, attempts=QF_ATTEMPTS, cancelled=cancelled,
+            src, work_dir, request, expected=target, preserve_boundary=bool(cuts), max_shells=max_shells,
+            plane_axes=(), scale=scale, timeout=timeout, attempts=QF_ATTEMPTS, cuts=cuts, cancelled=cancelled,
         )
         if mesh is None:
             return None
@@ -600,6 +660,7 @@ def _race_quadriflow(
     scale: float,
     timeout: float,
     attempts: int,
+    cuts: tuple[RingCut, ...] = (),
     cancelled: CancelledCallback | None,
 ):
     """시드를 바꿔 차례로 돌리고, 시간을 넘긴 시도는 죽이고 다음 시드로 넘어간다. 동시 실행은 서로 코어를 뺏어 더 느리다."""
@@ -644,7 +705,7 @@ def _race_quadriflow(
         if not data_to.meshes or data_to.meshes[0] is None:
             continue
         mesh = data_to.meshes[0]
-        if _qf_output_ok(mesh, expected, max_shells, plane_axes, scale):
+        if _qf_output_ok(mesh, expected, max_shells, plane_axes, scale, cuts):
             return mesh
         bpy.data.meshes.remove(mesh)
     return None
@@ -658,8 +719,11 @@ def _kill(process) -> None:
         pass
 
 
-def _qf_output_ok(mesh, expected: int, max_shells: int, plane_axes: tuple[str, ...], scale: float) -> bool:
-    """NaN 정점·큰 구멍·조각남·면수 이탈을 거른다. QuadriFlow 는 종료 코드 0 으로도 이런 메시를 낸다."""
+def _qf_output_ok(
+    mesh, expected: int, max_shells: int, plane_axes: tuple[str, ...], scale: float, cuts: tuple[RingCut, ...] = ()
+) -> bool:
+    """NaN 정점·큰 구멍·조각남·면수 이탈을 거른다. QuadriFlow 는 종료 코드 0 으로도 이런 메시를 낸다.
+    대칭면 루프와 절단 띠 경계(캡이 없을 때)는 구멍이 아니다."""
     import bmesh
 
     faces = len(mesh.polygons)
@@ -672,9 +736,16 @@ def _qf_output_ok(mesh, expected: int, max_shells: int, plane_axes: tuple[str, .
     bm = bmesh.new()
     bm.from_mesh(mesh)
     ok = True
+    # 대칭면 경계 옆의 미세 면 뭉치(엣지가 전형의 1~20%)는 스무딩·메우기로 펴지지 않아 종횡비 검사에서 떨어진다
+    lengths = sorted(edge.calc_length() for edge in bm.edges)
+    if lengths:
+        median = lengths[len(lengths) // 2]
+        tiny = sum(1 for length in lengths if length < median * TINY_EDGE_RATIO)
+        if tiny > len(lengths) * TINY_EDGE_MAX_SHARE:
+            ok = False
     hole_edges = 0
-    for loop in _boundary_loops(bm):
-        if _loop_on_plane(loop, plane_axes, scale):
+    for loop in _boundary_loops(bm) if ok else ():
+        if _loop_on_plane(loop, plane_axes, scale) or _loop_in_bands(loop, plane_axes, scale, cuts):
             continue
         if len(loop) > HOLE_MAX_EDGES:
             ok = False
@@ -745,6 +816,43 @@ def _loop_on_plane(loop, plane_axes: tuple[str, ...], scale: float) -> bool:
     return sum(1 for distance in distances if distance < tight) >= 0.5 * len(distances)
 
 
+def _loop_in_bands(loop, plane_axes: tuple[str, ...], scale: float, cuts: tuple[RingCut, ...]) -> bool:
+    """경계 루프의 정점이 모두 절단 띠 안(또는 대칭면 위)에 있으면 절단이 만든 경계다.
+    띠 안이라도 예상 링 둘레의 몇 배를 넘는 루프는 경계 주변을 덮지 못한 출력이다."""
+    if not cuts:
+        return False
+    longest_ring = max(2.0 * math.pi * cut.radius / max(cut.half_width * 2.0, 1e-12) for cut in cuts)
+    if len(loop) > longest_ring * BAND_LOOP_MAX_RATIO:
+        return False
+    loose = _plane_snap_tolerance(loop, scale) if plane_axes else 0.0
+    for edge in loop:
+        for vertex in edge.verts:
+            if in_band(tuple(vertex.co), cuts):
+                continue
+            if plane_axes and min(abs(vertex.co["XYZ".index(axis)]) for axis in plane_axes) < loose:
+                continue
+            return False
+    return True
+
+
+def _ring_report(output: MeshData, cut: RingCut) -> str:
+    """접합부 양쪽 바깥으로 닫힌 평행 링이 몇 개 이어지는지 — 나선이면 첫 링부터 닫히지 않는다.
+    방향 라벨은 진행 방향이 가장 많이 향하는 모델 축(+X/−Y 등)으로 적는다."""
+    offset = cut.half_width * BAND_LOOSE
+    parts = []
+    for sign in (-1.0, 1.0):
+        center = tuple(cut.center[i] + cut.normal[i] * offset * sign for i in range(3))
+        normal = tuple(cut.normal[i] * sign for i in range(3))
+        dominant = max(range(3), key=lambda i: abs(normal[i]))
+        label = ("+" if normal[dominant] >= 0.0 else "−") + "XYZ"[dominant]
+        result = ring_propagation(output, center, normal, cut.radius, RING_CHECK_DEPTH)
+        if not result.belt_ok:
+            parts.append(f"{label}쪽 링 없음({result.message})")
+        else:
+            parts.append(f"{label}쪽 {result.ring_size}정점 링 뒤로 닫힌 링 {result.closed_rings}/{RING_CHECK_DEPTH}")
+    return f"LOOP '{cut.name}' 링 전파: " + ", ".join(parts) + "."
+
+
 def _ordered_loop_vertices(loop) -> list | None:
     """루프가 단순 폐곡선(정점마다 루프 엣지 2개)이면 순서대로 정점을 돌려준다."""
     adjacency: dict = {}
@@ -782,7 +890,11 @@ def _repair_output(obj, plane_axes: tuple[str, ...], scale: float) -> None:
     bm.from_mesh(obj.data)
     border_vertices = list({vertex for edge in bm.edges if len(edge.link_faces) == 1 for vertex in edge.verts})
     if border_vertices:
-        bmesh.ops.remove_doubles(bm, verts=border_vertices, dist=SNAP_TOLERANCE_RATIO * scale)
+        # 대칭면 루프의 겹친 정점은 전형 엣지의 3% 정도 떨어져 있기도 하다(실측 2026-09-22, Y 대칭: 0.0017 대 0.05).
+        # 그대로 두면 스무딩이 고정 경계 정점을 못 움직여 종횡비 60 슬리버가 남는다.
+        lengths = sorted(edge.calc_length() for edge in bm.edges)
+        median = lengths[len(lengths) // 2] if lengths else 0.0
+        bmesh.ops.remove_doubles(bm, verts=border_vertices, dist=max(SNAP_TOLERANCE_RATIO * scale, BORDER_WELD_RATIO * median))
     plane_vertices: dict = {}
     for _ in range(REPAIR_ROUNDS):
         leftovers = []

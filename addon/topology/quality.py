@@ -560,3 +560,87 @@ def _distance_squared(first: Vector3, second: Vector3) -> float:
 def _check_cancelled(cancelled: CancelledCallback | None) -> None:
     if cancelled is not None and cancelled():
         raise RemeshCancelled()
+
+
+# --- 링 전파 -----------------------------------------------------------------
+
+RING_REACH_RATIO = 1.5  # 링 중심에서 반지름의 이 배수 안 면만 띠 후보로 본다
+
+@dataclass(frozen=True)
+class RingPropagation:
+    """평면을 가로지르는 쿼드 띠에서 시작해 한 방향으로 닫힌 평행 링이 몇 개 이어지는지."""
+    belt_ok: bool
+    ring_size: int
+    closed_rings: int
+    message: str = ""
+
+
+def ring_propagation(mesh: MeshData, center: Vector3, normal: Vector3, radius: float, depth: int = 4) -> RingPropagation:
+    """center·normal 평면을 가로지르는 엣지들이 이루는 쿼드 띠를 찾고, normal 쪽 가장자리 링에서 시작해
+    쿼드 반대편 엣지로 건너가며 닫힌 링이 depth 개까지 이어지는지 센다. 나선 격자는 띠 가장자리가 닫히지 않는다."""
+    faces = mesh.faces
+    vertices = mesh.vertices
+    reach = radius * RING_REACH_RATIO
+    signed = [sum((v[i] - center[i]) * normal[i] for i in range(3)) for v in vertices]
+    near = [f for f in faces if _distance(_centroid([vertices[v] for v in f]), center) <= reach]
+    belt = []
+    for face in near:
+        if len(face) != 4:
+            continue
+        straddling = [
+            _edge_key(a, b) for a, b in zip(face, (*face[1:], face[0]))
+            if (signed[a] < 0.0) != (signed[b] < 0.0)
+        ]
+        if straddling:
+            belt.append((face, straddling))
+    if not belt:
+        return RingPropagation(False, 0, 0, "평면을 가로지르는 면이 없습니다.")
+    if any(len(straddling) != 2 for _face, straddling in belt):
+        return RingPropagation(False, 0, 0, "평면을 가로지르는 띠에 쿼드 외 면이나 비스듬한 면이 섞였습니다.")
+    rim = set()
+    for face, straddling in belt:
+        for a, b in zip(face, (*face[1:], face[0])):
+            key = _edge_key(a, b)
+            if key not in straddling and signed[a] >= 0.0 and signed[b] >= 0.0:
+                rim.add(key)
+    if not _is_single_cycle(rim):
+        return RingPropagation(False, len(rim), 0, "띠 가장자리가 하나의 닫힌 링을 이루지 않습니다.")
+    edge_faces = _edge_faces(faces)
+    used_faces = {tuple(face) for face, _straddling in belt}
+    ring = rim
+    closed = 0
+    for _ in range(depth):
+        following = set()
+        next_faces = set()
+        for edge in ring:
+            owners = [faces[i] for i in edge_faces.get(edge, ()) if tuple(faces[i]) not in used_faces]
+            if len(owners) != 1 or len(owners[0]) != 4:
+                return RingPropagation(True, len(rim), closed, "")
+            face = owners[0]
+            opposite = [v for v in face if v not in edge]
+            following.add(_edge_key(opposite[0], opposite[1]))
+            next_faces.add(tuple(face))
+        if len(following) != len(ring) or not _is_single_cycle(following):
+            return RingPropagation(True, len(rim), closed, "")
+        used_faces |= next_faces
+        ring = following
+        closed += 1
+    return RingPropagation(True, len(rim), closed, "")
+
+
+def _is_single_cycle(edges: set[tuple[int, int]]) -> bool:
+    if len(edges) < 3:
+        return False
+    neighbors = _edge_neighbors(tuple(edges))
+    if any(len(adjacent) != 2 for adjacent in neighbors.values()):
+        return False
+    start = next(iter(neighbors))
+    seen = {start}
+    stack = [start]
+    while stack:
+        current = stack.pop()
+        for neighbor in neighbors[current]:
+            if neighbor not in seen:
+                seen.add(neighbor)
+                stack.append(neighbor)
+    return len(seen) == len(neighbors)

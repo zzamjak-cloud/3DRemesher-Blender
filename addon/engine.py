@@ -67,18 +67,13 @@ def remesh(
     _validate_size(engine_input.mesh)
     _check_cancelled(cancelled)
     _report(progress, 0.01, "입력과 특징선 검증")
-    required_guides = tuple(
-        guide.name
-        for guide in engine_input.guide_curves
-        if any(kind in {"LOOP", "STRIP"} for kind in guide.kind)
-    )
-    if required_guides and settings.topology_mode in {"LEGACY", "QUADRIFLOW"}:
-        raise ValueError("실험 엔진과 QuadriFlow 경로는 필수 LOOP/STRIP 가이드를 보존하지 못합니다. 격자 경로를 선택해 주세요.")
+    required_guides, strip_guides = required_guide_names(engine_input)
+    check_guide_gate(required_guides, strip_guides, settings.topology_mode)
     if settings.topology_mode in {"AUTO", "STRUCTURED"}:
         structured = _try_structured_remesh(engine_input, progress=progress, cancelled=cancelled)
         if structured is not None:
             return structured
-        if required_guides:
+        if strip_guides or (required_guides and settings.topology_mode == "STRUCTURED"):
             raise ValueError(f"필수 가이드의 연속 엣지 경로를 만들지 못했습니다: {', '.join(required_guides)}. 현재 입력 형상에서 필수 루프와 쿼드 띠를 배치할 수 없습니다.")
         if settings.topology_mode == "STRUCTURED":
             raise ValueError("이 형상과 가이드에는 연속 격자 배치를 만들 수 없습니다. 격자 경계를 지정하거나 실험 엔진을 선택해 주세요.")
@@ -89,6 +84,12 @@ def remesh(
             return general
         if settings.topology_mode == "QUADRIFLOW":
             raise ValueError(quadriflow_warning or "QuadriFlow 경로가 결과를 만들지 못했습니다.")
+        if required_guides:
+            # 실험 엔진은 LOOP 를 출력 링으로 고정하지 못하므로 여기서 멈춘다
+            raise ValueError(
+                f"필수 가이드의 연속 엣지 경로를 만들지 못했습니다: {', '.join(required_guides)}. "
+                f"격자 경로가 실패했고 QuadriFlow 절단 링도 쓸 수 없습니다. {quadriflow_warning}".rstrip()
+            )
     source = engine_input.mesh
     scale = max(max(v[a] for v in source.vertices)-min(v[a] for v in source.vertices) for a in range(3))
     if scale <= 0:
@@ -214,6 +215,24 @@ def remesh(
         analysis.boundary_edge_count,analysis.non_manifold_edge_count,analysis.degenerate_face_count,
         max_aspect,mean_aspect,error,max(distances,default=0.),sum(distances)/max(1,len(distances)),
         symmetry_error,field_score),tuple(dict.fromkeys(warnings)),())
+
+
+def required_guide_names(engine_input: EngineInput) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """(LOOP 또는 STRIP 이 있는 가이드 이름, STRIP 이 있는 가이드 이름)."""
+    required = tuple(
+        guide.name for guide in engine_input.guide_curves
+        if any(kind in {"LOOP", "STRIP"} for kind in guide.kind)
+    )
+    strips = tuple(guide.name for guide in engine_input.guide_curves if "STRIP" in guide.kind)
+    return required, strips
+
+
+def check_guide_gate(required_guides: tuple[str, ...], strip_guides: tuple[str, ...], topology_mode: str) -> None:
+    """경로가 보존할 수 없는 필수 가이드는 실행 전에 거절한다. QuadriFlow 경로는 LOOP 를 절단 링으로 보존하고 STRIP 은 못한다."""
+    if required_guides and topology_mode == "LEGACY":
+        raise ValueError("실험 엔진은 필수 LOOP/STRIP 가이드를 보존하지 못합니다. 격자 경로나 QuadriFlow 를 선택해 주세요.")
+    if strip_guides and topology_mode == "QUADRIFLOW":
+        raise ValueError("QuadriFlow 경로는 필수 STRIP 가이드를 보존하지 못합니다. 격자 경로를 선택해 주세요.")
 
 
 def try_quadriflow_remesh(

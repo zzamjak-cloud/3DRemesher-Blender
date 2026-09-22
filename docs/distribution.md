@@ -28,8 +28,8 @@ https://zzamjak-cloud.github.io/3DRemesher-Blender/index.json
 
 ```bash
 python3 scripts/verify_distribution.py \
-  --previous-zip dist/zzamjak_3d_remesher-v0.4.1.zip \
-  --expected-version 0.4.2
+  --previous-zip dist/zzamjak_3d_remesher-v0.4.2.zip \
+  --expected-version 0.5.0
 ```
 
 검증 결과는 `dist/distribution-verification.json`에 저장합니다. 원격 저장소에서 동기화한 버전과 실제 설치 버전·활성화 상태·리메시 결과를 검사합니다.

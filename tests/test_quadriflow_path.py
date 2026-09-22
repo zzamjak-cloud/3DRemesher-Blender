@@ -25,15 +25,20 @@ class QuadriflowPathTests(unittest.TestCase):
     def test_not_available_without_bpy(self):
         self.assertFalse(is_available())
 
-    def test_required_guides_are_unsupported(self):
+    def test_strip_guides_are_unsupported_but_loops_become_ring_cuts(self):
         loop = GuideCurveData(
             name="REMESH_GUIDE_ring",
             splines=(((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 1.0, 0.0), (0.0, 1.0, 0.0)),),
             kind=("LOOP",),
         )
-        engine_input = build_engine_input(_cube_mesh(), RemeshSettings(topology_mode="AUTO"), (loop,))
-
-        self.assertIn("LOOP/STRIP", unsupported_reason(engine_input))
+        strip = GuideCurveData(
+            name="REMESH_GUIDE_STRIP_arm",
+            splines=(((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (2.0, 0.0, 0.0)),),
+            kind=("STRIP",),
+        )
+        # LOOP 는 절단 링으로 보존하므로 이 경로가 받고, STRIP 은 여전히 거절한다
+        self.assertEqual(unsupported_reason(build_engine_input(_cube_mesh(), RemeshSettings(topology_mode="AUTO"), (loop,))), "")
+        self.assertIn("STRIP", unsupported_reason(build_engine_input(_cube_mesh(), RemeshSettings(topology_mode="AUTO"), (strip,))))
         self.assertEqual(unsupported_reason(build_engine_input(_cube_mesh(), RemeshSettings())), "")
 
     def test_open_sheet_is_unsupported(self):
@@ -56,7 +61,18 @@ class QuadriflowPathTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "Blender Python"):
             RemeshBackend().remesh(engine_input)
 
-    def test_quadriflow_mode_rejects_required_guides_before_running(self):
+    def test_quadriflow_mode_rejects_strip_guides_before_running(self):
+        strip = GuideCurveData(
+            name="REMESH_GUIDE_STRIP_arm",
+            splines=(((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (2.0, 0.0, 0.0)),),
+            kind=("STRIP",),
+        )
+        engine_input = build_engine_input(_cube_mesh(), RemeshSettings(topology_mode="QUADRIFLOW"), (strip,))
+
+        with self.assertRaisesRegex(ValueError, "STRIP"):
+            RemeshBackend().remesh(engine_input)
+
+    def test_quadriflow_mode_with_loop_guide_reaches_the_path(self):
         loop = GuideCurveData(
             name="REMESH_GUIDE_ring",
             splines=(((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 1.0, 0.0), (0.0, 1.0, 0.0)),),
@@ -64,7 +80,19 @@ class QuadriflowPathTests(unittest.TestCase):
         )
         engine_input = build_engine_input(_cube_mesh(), RemeshSettings(topology_mode="QUADRIFLOW"), (loop,))
 
-        with self.assertRaisesRegex(ValueError, "가이드"):
+        # bpy 가 없는 환경이므로 게이트가 아니라 경로 진입에서 멈춰야 한다
+        with self.assertRaisesRegex(RuntimeError, "Blender Python"):
+            RemeshBackend().remesh(engine_input)
+
+    def test_auto_with_loop_guide_does_not_fall_back_to_legacy_engine(self):
+        loop = GuideCurveData(
+            name="REMESH_GUIDE_ring",
+            splines=(((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 1.0, 0.0), (0.0, 1.0, 0.0)),),
+            kind=("LOOP",),
+        )
+        engine_input = build_engine_input(_cube_mesh(), RemeshSettings(topology_mode="AUTO"), (loop,))
+
+        with self.assertRaisesRegex(ValueError, "QuadriFlow 절단 링"):
             RemeshBackend().remesh(engine_input)
 
     def test_auto_skips_quadriflow_for_density_and_direction_controls(self):

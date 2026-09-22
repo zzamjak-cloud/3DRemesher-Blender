@@ -37,6 +37,65 @@ def _decode(value, t, b):
     return add(mul(t, cos(angle)), mul(b, sin(angle)))
 
 
+CURVATURE_WEIGHT = 2.0
+
+
+def _curvature_anchors(vertices, faces, normals, frames, centers, edge_faces, hard_edges=frozenset()):
+    """이산 곡률 텐서의 주축을 앵커로 쓴다. 굽힘 '크기'만 쓰면 삼각화 대각선으로 편향된다."""
+    tensors = [[0.,0.,0.] for _ in faces]
+    for (a,b), indices in edge_faces.items():
+        # 특징선은 기존 앵커가 방향을 확정하므로 곡률 텐서에서 제외한다.
+        if len(indices)!=2 or (a,b) in hard_edges:
+            continue
+        i,j = indices
+        delta = sub(vertices[b],vertices[a])
+        length = sqrt(dot(delta,delta))
+        if length<=1e-15:
+            continue
+        direction = mul(delta,1/length)
+        ni,nj = normals[i],normals[j]
+        axis = cross(ni,nj)
+        bend = atan2(sqrt(dot(axis,axis)),dot(ni,nj))
+        # 법선이 벌어지면 볼록(+), 모이면 오목(−). 부호가 있어야 안장면이 상쇄되지 않는다.
+        if dot(sub(nj,ni),sub(centers[j],centers[i]))<0.:
+            bend = -bend
+        scale = bend*length
+        for k in indices:
+            t,bt = frames[k]
+            x,y = dot(direction,t),dot(direction,bt)
+            norm = sqrt(x*x+y*y)
+            if norm<=1e-15:
+                continue
+            x,y = x/norm,y/norm
+            tensor = tensors[k]
+            tensor[0] += scale*x*x
+            tensor[1] += scale*x*y
+            tensor[2] += scale*y*y
+    rosy = [0j for _ in faces]
+    anisotropy = [0. for _ in faces]
+    relative = [0. for _ in faces]
+    for k,(xx,xy,yy) in enumerate(tensors):
+        # z 의 위상은 주축 각의 2배라 4방향 표현은 z 를 한 번 더 제곱한 값이다.
+        z = complex(xx-yy,2*xy)
+        magnitude = abs(z)
+        half = magnitude*.5
+        mean = (xx+yy)*.5
+        anisotropy[k] = half
+        relative[k] = 2*half/(abs(mean+half)+abs(mean-half)+1e-30)
+        if magnitude>1e-12:
+            rosy[k] = z*z/(magnitude*magnitude)
+    # 평면이 많은 박스형 입력은 0 이 절반을 넘어 중앙값이 0 이 되므로 0 이 아닌 값만으로 기준을 잡는다
+    ordered = sorted(a for a in anisotropy if a>1e-12)
+    median = ordered[len(ordered)//2] if ordered else 0.
+    weights = [0. for _ in faces]
+    if median>0.:
+        # 구·평면(rel≈0)과 잡음(A≪median)은 걸러지고 원통 표면만 ≈1 의 가중을 받는다.
+        for k,half in enumerate(anisotropy):
+            if rosy[k]:
+                weights[k] = CURVATURE_WEIGHT*relative[k]*half/(half+median)
+    return rosy,weights
+
+
 def solve_field(mesh, guide_segments=(), *, iterations=16, cancelled=None):
     """면 접평면의 복소수 4승 표현으로 90도 동치를 보존한다."""
     vertices, faces = mesh.vertices, mesh.faces
@@ -50,7 +109,6 @@ def solve_field(mesh, guide_segments=(), *, iterations=16, cancelled=None):
     neighbors = [[] for _ in faces]
     anchors = [0j for _ in faces]
     weights = [0.0 for _ in faces]
-    curvature = [0j for _ in faces]
     for (a,b), indices in edge_faces.items():
         direction = unit(sub(vertices[b],vertices[a]))
         feature = (a,b) in mesh.hard_edges or len(indices)==1
@@ -64,10 +122,7 @@ def solve_field(mesh, guide_segments=(), *, iterations=16, cancelled=None):
             if not feature:
                 neighbors[i].append(j)
                 neighbors[j].append(i)
-            bend = max(0.,1-dot(normals[i],normals[j]))
-            for k in indices:
-                t,bt = frames[k]
-                curvature[k] += bend*_encode(direction,t,bt)
+    curvature, curvature_weights = _curvature_anchors(vertices, faces, normals, frames, centers, edge_faces, mesh.hard_edges)
     extent = max(max(v[a] for v in vertices)-min(v[a] for v in vertices) for a in range(3))
     radius2 = max(extent*extent*.04,1e-15)
     for i,p in enumerate(centers):
@@ -89,9 +144,10 @@ def solve_field(mesh, guide_segments=(), *, iterations=16, cancelled=None):
                 weight = 12*radius2/(radius2+dist)
                 anchors[i] += weight*_encode(tangent,t,b)
                 weights[i] += weight
-        if abs(curvature[i])>1e-8:
-            anchors[i] += .5*curvature[i]/abs(curvature[i])
-            weights[i] += .5
+        weight = curvature_weights[i]
+        if weight>0.:
+            anchors[i] += weight*curvature[i]
+            weights[i] += weight
     values = [a/abs(a) if abs(a)>1e-12 else 1+0j for a in anchors]
     for _ in range(iterations):
         _check(cancelled)

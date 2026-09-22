@@ -265,6 +265,45 @@ def _column_points(mesh: MeshData, segment: int, row_count: int, ring_size: int)
 def _issue_codes(report) -> set[str]:
     return {issue.code for issue in report.issues}
 
+class RingPropagationTests(unittest.TestCase):
+    def test_ring_grid_tube_propagates_closed_rings(self):
+        from addon.topology.quality import ring_propagation
+
+        mesh = _quad_tube(12, 6)
+        result = ring_propagation(mesh, (0.0, 0.0, 0.5), (0.0, 0.0, 1.0), 1.0, depth=4)
+
+        self.assertTrue(result.belt_ok, result.message)
+        self.assertEqual(result.ring_size, 12)
+        self.assertEqual(result.closed_rings, 4)
+        # 반대 방향으로는 관 끝이라 링이 이어지지 않는다
+        backward = ring_propagation(mesh, (0.0, 0.0, 0.5), (0.0, 0.0, -1.0), 1.0, depth=4)
+        self.assertTrue(backward.belt_ok)
+        self.assertEqual(backward.closed_rings, 0)
+
+    def test_helical_grid_has_no_closed_belt(self):
+        from addon.topology.quality import ring_propagation
+
+        mesh = _quad_tube(12, 6, twist=0.35)
+        result = ring_propagation(mesh, (0.0, 0.0, 2.5), (0.0, 0.0, 1.0), 1.0, depth=2)
+
+        self.assertFalse(result.belt_ok)
+
+
+def _quad_tube(around: int, along: int, twist: float = 0.0) -> MeshData:
+    """z=0..along 원통의 쿼드 격자. twist 가 0 이 아니면 둘레 정점을 한 칸마다 비틀어 링이 닫히지 않는 나선 격자를 만든다."""
+    vertices = []
+    for level in range(along + 1):
+        for k in range(around):
+            angle = 2 * math.pi * k / around
+            vertices.append((math.cos(angle), math.sin(angle), float(level) + twist * k))
+    faces = []
+    for level in range(along):
+        for k in range(around):
+            a = level * around + k
+            b = level * around + (k + 1) % around
+            faces.append((a, b, b + around, a + around))
+    return MeshData(tuple(vertices), tuple(faces))
+
 
 if __name__ == "__main__":
     unittest.main()

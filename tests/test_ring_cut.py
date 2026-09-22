@@ -1,0 +1,128 @@
+"""LOOP 가이드 절단 링의 순수 계산(평면 피팅·브리지 DP)을 bpy 없이 검사한다."""
+
+from __future__ import annotations
+
+import math
+import unittest
+
+from addon.core import GuideCurveData, RemeshSettings, build_engine_input
+from addon.ring_cut import GAP_CLOSE_RATIO, RingCut, _chains, bridge_steps, mirror_cuts, ring_cuts
+from tests.test_engine import _cube_mesh
+
+
+def _ring(count: int, radius: float, z: float, phase: float = 0.0):
+    return [(radius * math.cos(2 * math.pi * k / count + phase), radius * math.sin(2 * math.pi * k / count + phase), z) for k in range(count)]
+
+
+class RingCutTests(unittest.TestCase):
+    def test_loop_guide_becomes_plane_with_center_normal_and_radius(self):
+        points = tuple((1.3, 0.3 * math.cos(t), 0.3 * math.sin(t)) for t in [2 * math.pi * k / 16 for k in range(16)])
+        loop = GuideCurveData(name="REMESH_GUIDE_arm", splines=(points,), kind=("LOOP",))
+        direction = GuideCurveData(name="REMESH_GUIDE_hint", splines=(((0.0, 0.0, 0.0), (1.0, 0.0, 0.0)),), kind=("DIRECTION",))
+        engine_input = build_engine_input(_cube_mesh(), RemeshSettings(target_quad_count=100), (loop, direction))
+
+        cuts = ring_cuts(engine_input, 0.1)
+
+        self.assertEqual(len(cuts), 1)
+        cut = cuts[0]
+        self.assertEqual(cut.name, "REMESH_GUIDE_arm")
+        self.assertAlmostEqual(cut.center[0], 1.3)
+        self.assertAlmostEqual(abs(cut.normal[0]), 1.0, places=6)
+        self.assertAlmostEqual(cut.radius, 0.3, places=6)
+        self.assertAlmostEqual(cut.half_width, 0.05)
+        self.assertAlmostEqual(cut.signed_distance((1.4, 0.0, 0.0)) * cut.normal[0], 0.1)
+        self.assertTrue(cut.within((1.3, 0.42, 0.0), 1.5))
+        self.assertFalse(cut.within((1.3, 0.5, 0.0), 1.5))
+
+    def test_degenerate_loops_are_skipped(self):
+        line = GuideCurveData(name="REMESH_GUIDE_flat", splines=(((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (2.0, 0.0, 0.0)),), kind=("LOOP",))
+        engine_input = build_engine_input(_cube_mesh(), RemeshSettings(), (line,))
+
+        self.assertEqual(ring_cuts(engine_input, 0.1), ())
+
+    def test_bridge_uses_exactly_the_unavoidable_triangles_for_closed_rings(self):
+        a = _ring(19, 1.0, 0.0)
+        b = _ring(18, 1.0, 0.1)
+        cost, steps = bridge_steps(a, b, True, penalty=4.0 * (2 * math.pi / 18))
+
+        kinds = [kind for _i, _j, kind in steps]
+        self.assertEqual(kinds.count("quad"), 18)
+        self.assertEqual(len(kinds) - kinds.count("quad"), 1)
+        self.assertTrue(math.isfinite(cost))
+
+    def test_bridge_of_equal_rings_is_all_quads(self):
+        a = _ring(12, 1.0, 0.0)
+        b = _ring(12, 1.0, 0.1, phase=0.1)
+        _cost, steps = bridge_steps(a, b, True, penalty=1.0)
+
+        self.assertTrue(all(kind == "quad" for _i, _j, kind in steps))
+        self.assertEqual(len(steps), 12)
+
+    def test_bridge_of_open_chains_consumes_every_vertex(self):
+        a = [(x, 0.0, 0.0) for x in range(6)]
+        b = [(x * 5.0 / 3.0, 1.0, 0.0) for x in range(4)]
+        _cost, steps = bridge_steps(a, b, False, penalty=1.0)
+
+        kinds = [kind for _i, _j, kind in steps]
+        self.assertEqual(kinds.count("quad"), 3)
+        self.assertEqual(kinds.count("a"), 2)
+        self.assertEqual(kinds.count("b"), 0)
+
+    def test_negative_side_loop_is_mirrored_to_positive_side_and_duplicates_merge(self):
+        left = RingCut("left", (-1.3, 0.0, 0.0), (-1.0, 0.0, 0.0), 0.3, 0.05, tuple(_ring(8, 0.3, 0.0)))
+        left = RingCut(left.name, left.center, left.normal, left.radius, left.half_width, tuple((-1.3, y, z) for _x, y, z in _ring(8, 0.3, 0.0)))
+        right = RingCut("right", (1.3, 0.0, 0.0), (1.0, 0.0, 0.0), 0.3, 0.05, tuple((1.3, y, z) for _x, y, z in _ring(8, 0.3, 0.0)))
+        straddling = RingCut("neck", (0.0, 0.0, 1.2), (0.0, 0.0, 1.0), 0.2, 0.05, tuple((x, y, 1.2) for x, y, _z in _ring(8, 0.2, 0.0)))
+
+        mirrored = mirror_cuts((left,), ("X",))
+        self.assertEqual(len(mirrored), 1)
+        self.assertAlmostEqual(mirrored[0].center[0], 1.3)
+        self.assertTrue(all(p[0] > 0.0 for p in mirrored[0].points))
+        # 양의 쪽에 이미 같은 루프가 있으면 하나만 남고, 대칭면을 가로지르는 루프는 그대로 둔다
+        merged = mirror_cuts((left, right, straddling), ("X",))
+        self.assertEqual([cut.name for cut in merged], ["left", "neck"])
+        self.assertEqual(mirror_cuts((left,), ()), (left,))
+
+    def test_chain_with_one_small_gap_is_treated_as_closed_ring(self):
+        ring = _ring(12, 1.0, 0.0)
+        verts = [_Vert(p) for p in ring]
+        edges = [_Edge(verts[i], verts[(i + 1) % 12]) for i in range(12)]
+        closed = _chains(edges)
+        self.assertEqual(len(closed), 1)
+        self.assertTrue(closed[0][1])
+        # 엣지 하나가 빠진 링(작은 구멍)은 끝점이 엣지 하나 거리라 닫힘으로 승격된다
+        gapped = _chains(edges[1:])
+        self.assertEqual(len(gapped), 1)
+        self.assertTrue(gapped[0][1])
+        self.assertEqual(len(gapped[0][0]), 12)
+        # 끝점이 평균 엣지의 GAP_CLOSE_RATIO 배보다 멀면 열린 호로 남는다
+        arc = _chains(edges[3:])
+        self.assertEqual(len(arc), 1)
+        self.assertFalse(arc[0][1])
+        self.assertGreater(math.dist(ring[3], ring[0]), GAP_CLOSE_RATIO * (2 * math.pi / 12) * 0.9)
+
+    def test_small_hole_sharing_a_ring_vertex_is_detached(self):
+        ring = _ring(12, 1.0, 0.0)
+        verts = [_Vert(p) for p in ring]
+        edges = [_Edge(verts[i], verts[(i + 1) % 12]) for i in range(12)]
+        # 정점 0 에 붙은 4정점 구멍(정점 0 → h1 → h2 → h3 → 정점 0)
+        hole = [_Vert((1.2, 0.1, 0.0)), _Vert((1.3, 0.0, 0.0)), _Vert((1.2, -0.1, 0.0))]
+        edges += [_Edge(verts[0], hole[0]), _Edge(hole[0], hole[1]), _Edge(hole[1], hole[2]), _Edge(hole[2], verts[0])]
+        chains = _chains(edges)
+        self.assertEqual(len(chains), 1)
+        self.assertTrue(chains[0][1])
+        self.assertEqual(len(chains[0][0]), 12)
+
+
+class _Vert:
+    def __init__(self, co):
+        self.co = co
+
+
+class _Edge:
+    def __init__(self, a, b):
+        self.verts = (a, b)
+
+
+if __name__ == "__main__":
+    unittest.main()

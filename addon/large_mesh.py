@@ -25,6 +25,8 @@ from .engine import (
     MAX_SOURCE_FACES,
     MAX_SOURCE_VERTICES,
     _try_structured_remesh,
+    check_guide_gate,
+    required_guide_names,
     try_quadriflow_remesh,
 )
 
@@ -57,24 +59,20 @@ def remesh_large(
         return RemeshBackend().remesh(engine_input, progress=progress, cancelled=cancelled)
 
     settings = engine_input.settings
-    required_guides = tuple(
-        guide.name for guide in engine_input.guide_curves
-        if any(kind in {"LOOP", "STRIP"} for kind in guide.kind)
-    )
-    if required_guides and settings.topology_mode in {"LEGACY", "QUADRIFLOW"}:
-        raise ValueError("실험 엔진과 QuadriFlow 경로는 필수 LOOP/STRIP 가이드를 보존하지 못합니다. 격자 경로를 선택해 주세요.")
+    required_guides, strip_guides = required_guide_names(engine_input)
+    check_guide_gate(required_guides, strip_guides, settings.topology_mode)
     structured_warning = ""
     if settings.topology_mode in {"AUTO", "STRUCTURED"}:
         try:
             structured = _try_structured_remesh(engine_input, progress=progress, cancelled=cancelled)
         except ValueError as exc:
-            if required_guides or settings.topology_mode == "STRUCTURED":
+            if strip_guides or settings.topology_mode == "STRUCTURED":
                 raise
             structured = None
             structured_warning = f"원본 메시의 격자 배치를 건너뛰고 임시 프록시를 사용했습니다: {exc}"
         if structured is not None:
             return structured
-        if required_guides:
+        if strip_guides or (required_guides and settings.topology_mode == "STRUCTURED"):
             raise ValueError(f"필수 가이드의 연속 엣지 경로를 만들지 못했습니다: {', '.join(required_guides)}. 현재 입력 형상에서 필수 루프와 쿼드 띠를 배치할 수 없습니다.")
         if settings.topology_mode == "STRUCTURED":
             raise ValueError("이 형상과 가이드에는 연속 격자 배치를 만들 수 없습니다. 격자 경계를 지정하거나 실험 엔진을 선택해 주세요.")
@@ -85,6 +83,11 @@ def remesh_large(
             return general
         if settings.topology_mode == "QUADRIFLOW":
             raise ValueError(quadriflow_warning or "QuadriFlow 경로가 결과를 만들지 못했습니다.")
+        if required_guides:
+            raise ValueError(
+                f"필수 가이드의 연속 엣지 경로를 만들지 못했습니다: {', '.join(required_guides)}. "
+                f"격자 경로가 실패했고 QuadriFlow 절단 링도 쓸 수 없습니다. {quadriflow_warning}".rstrip()
+            )
 
     _require_blender()
     try:
